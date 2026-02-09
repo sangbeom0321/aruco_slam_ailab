@@ -1,0 +1,33 @@
+from setuptools import setup
+import os
+from glob import glob
+
+package_name = 'aruco_slam_ailab'
+
+setup(
+    name=package_name,
+    version='0.1.0',
+    packages=[package_name],
+    data_files=[
+        ('share/ament_index/resource_index/packages',
+            ['resource/' + package_name]),
+        ('share/' + package_name, ['package.xml']),
+        (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
+        (os.path.join('share', package_name, 'models'), 
+         [f for f in glob('models/**/*', recursive=True) if os.path.isfile(f)]),
+        (os.path.join('share', package_name, 'rviz'), glob('rviz/*.rviz')),
+    ],
+    install_requires=['setuptools'],
+    zip_safe=True,
+    maintainer='root',
+    maintainer_email='root@todo.todo',
+    description='ArUco marker detection and localization package',
+    license='Apache License, Version 2.0',
+    tests_require=['pytest'],
+    entry_points={
+        'console_scripts': [
+            'aruco_detector_node = aruco_slam_ailab.aruco_detector_node:main',
+            'aruco_global_position = aruco_slam_ailab.aruco_global_position:main',
+        ],
+    },
+)

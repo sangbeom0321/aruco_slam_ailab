@@ -1,0 +1,34 @@
+# Context: 'aruco_slam_ailab' ROS 2 Package (Humble)
+You are developing within an existing ROS 2 package named `aruco_slam_ailab`.
+Do NOT create a new ROS package. Respect and preserve existing file structure.
+
+## Goal
+Implement a Factor Graph SLAM backend using GTSAM (ISAM2) with:
+- IMU preintegration (prediction + IMU factors)
+- wheel odometry constraint (optional but supported)
+- ArUco landmark factors with strict ID-based loop closure
+
+## Fixed Inputs (Topics)
+1. /imu (sensor_msgs/Imu) : raw IMU (high rate, e.g., 200Hz)
+2. /wheel_odom (nav_msgs/Odometry) : wheel encoder odom (lower rate)
+3. /aruco_poses (custom msg) : marker observations (ID + relative pose)
+
+## Fixed Outputs
+1. /odometry/imu_incremental (nav_msgs/Odometry) : prediction-only incremental odom
+2. /odometry/global (nav_msgs/Odometry) : optimized global pose (map frame)
+3. TF: map -> odom (and optionally odom -> base_link if required)
+
+## System Constraints
+- No new package creation. Only modify within `aruco_slam_ailab`.
+- Loop closure is strictly marker-ID based:
+  re-observing the same ArUco ID adds an additional constraint to the same landmark variable.
+- Keep code modular: separate preintegration and graph optimization nodes.
+- Prefer C++17, ROS 2 rclcpp, and GTSAM official APIs.
+- Provide robust parameterization (YAML) for noise, rate, frames, gravity, bias, keyframe rules.
+
+## Engineering Requirements
+- Thread-safe buffers for IMU/odom/marker measurements.
+- Deterministic keyframe creation policy (time-based or distance-based).
+- Clear frame conventions and consistent Pose3 usage (SE(3)).
+- Provide compile-time and runtime diagnostics logs.
+- Provide minimal unit-style checks or debug prints (factor counts, chi2, residual norms).

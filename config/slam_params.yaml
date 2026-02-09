@@ -1,0 +1,54 @@
+/**:
+  ros__parameters:
+    # Topics
+    imu_topic: "/imu"
+    wheel_odom_topic: "/wheel_odom"
+    aruco_poses_topic: "/aruco_poses"
+
+    # Frames
+    base_link_frame: "base_link"
+    imu_frame: "imu_link"
+    camera_frame: "camera_link"
+    odom_frame: "odom"
+    map_frame: "map"
+
+    # IMU noise parameters
+    imu_acc_noise: 0.01          # m/s^2
+    imu_gyr_noise: 0.001          # rad/s
+    imu_acc_bias_n: 0.0001       # m/s^2
+    imu_gyr_bias_n: 0.00001       # rad/s
+    imu_gravity: 9.81             # m/s^2
+
+    # Extrinsic calibrations (base_link to IMU)
+    # Translation [x, y, z] in meters
+    ext_trans_base_imu: [0.0, 0.0, 0.0]
+    # Rotation matrix (row-major): [r11, r12, r13, r21, r22, r23, r31, r32, r33]
+    ext_rot_base_imu: [1.0, 0.0, 0.0,
+                       0.0, 1.0, 0.0,
+                       0.0, 0.0, 1.0]
+
+    # Extrinsic calibrations (base_link to Camera)
+    # Camera position: x=0.4m forward, z=0.0225m up, no rotation
+    ext_trans_base_cam: [0.4, 0.0, 0.0225]
+    ext_rot_base_cam: [1.0, 0.0, 0.0,
+                       0.0, 1.0, 0.0,
+                       0.0, 0.0, 1.0]
+
+    # Wheel odometry parameters
+    use_wheel_odom: false
+    wheel_odom_trans_noise: 0.1   # meters
+    wheel_odom_rot_noise: 0.1      # radians
+
+    # ArUco observation parameters
+    aruco_observation_frame: "camera"  # "base_link" or "camera"
+    aruco_trans_noise: 0.05        # meters
+    aruco_rot_noise: 0.1           # radians
+
+    # Keyframe policy
+    keyframe_time_interval: 0.1    # seconds
+    keyframe_distance_threshold: 0.5  # meters
+    keyframe_angle_threshold: 0.2    # radians
+
+    # ISAM2 parameters
+    isam_relinearize_threshold: 0.1
+    isam_relinearize_skip: 1
