@@ -13,6 +13,7 @@
 #include <memory>
 #include <vector>
 #include <map>
+#include <set>
 #include <cmath>
 
 class ArucoDetectorNode : public rclcpp::Node {
@@ -137,25 +138,40 @@ private:
             cv::Mat debug_image = cv_image.clone();
 
             if (!ids.empty()) {
-                // Draw detected markers
-                cv::aruco::drawDetectedMarkers(debug_image, corners, ids);
-
-                // Estimate poses for all detected markers (no filtering)
+                // Estimate poses for all detected markers
                 std::vector<cv::Vec3d> rvecs, tvecs;
                 cv::aruco::estimatePoseSingleMarkers(
                     corners, marker_size_,
                     camera_matrix_, dist_coeffs_,
                     rvecs, tvecs);
 
+                // ID 0~9만 사용 (이외는 탐색 결과에서 제외)
+                std::vector<int> ids_filt;
+                std::vector<std::vector<cv::Point2f>> corners_filt;
+                std::vector<cv::Vec3d> rvecs_filt, tvecs_filt;
+                for (size_t idx = 0; idx < ids.size(); ++idx) {
+                    if (target_marker_ids_.count(ids[idx]) == 0) continue;
+                    ids_filt.push_back(ids[idx]);
+                    corners_filt.push_back(corners[idx]);
+                    rvecs_filt.push_back(rvecs[idx]);
+                    tvecs_filt.push_back(tvecs[idx]);
+                }
+
+                if (ids_filt.empty()) {
+                    // 0~9에 해당하는 마커 없음
+                } else {
+                // Draw detected markers (0~9만)
+                cv::aruco::drawDetectedMarkers(debug_image, corners_filt, ids_filt);
+
                 // Create custom MarkerArray for SLAM backend
                 aruco_slam_ailab::msg::MarkerArray marker_array;
                 marker_array.header.stamp = msg->header.stamp;
                 marker_array.header.frame_id = camera_frame_;
 
-                for (size_t idx = 0; idx < ids.size(); ++idx) {
-                    cv::Vec3d rvec = rvecs[idx];
-                    cv::Vec3d tvec = tvecs[idx];
-                    int marker_id = ids[idx];
+                for (size_t idx = 0; idx < ids_filt.size(); ++idx) {
+                    cv::Vec3d rvec = rvecs_filt[idx];
+                    cv::Vec3d tvec = tvecs_filt[idx];
+                    int marker_id = ids_filt[idx];
 
                     // Draw axis on debug image
                     cv::drawFrameAxes(debug_image, camera_matrix_, dist_coeffs_,
@@ -186,15 +202,15 @@ private:
                 // Publish custom MarkerArray directly for SLAM backend
                 aruco_poses_pub_->publish(marker_array);
                 
-                // Publish visualization markers for RViz
+                // Publish visualization markers for RViz (0~9만)
                 visualization_msgs::msg::MarkerArray vis_marker_array;
-                vis_marker_array.markers.resize(ids.size());
+                vis_marker_array.markers.resize(ids_filt.size());
                 
-                for (size_t idx = 0; idx < ids.size(); ++idx) {
+                for (size_t idx = 0; idx < ids_filt.size(); ++idx) {
                     visualization_msgs::msg::Marker& vis_marker = vis_marker_array.markers[idx];
                     vis_marker.header = marker_array.header;
                     vis_marker.ns = "aruco_markers";
-                    vis_marker.id = ids[idx];
+                    vis_marker.id = ids_filt[idx];
                     vis_marker.type = visualization_msgs::msg::Marker::CUBE;
                     vis_marker.action = visualization_msgs::msg::Marker::ADD;
                     
@@ -208,19 +224,20 @@ private:
                     
                     // Set color based on marker ID
                     vis_marker.color.a = 0.7;
-                    vis_marker.color.r = ((ids[idx] * 37) % 255) / 255.0;
-                    vis_marker.color.g = ((ids[idx] * 73) % 255) / 255.0;
-                    vis_marker.color.b = ((ids[idx] * 113) % 255) / 255.0;
+                    vis_marker.color.r = ((ids_filt[idx] * 37) % 255) / 255.0;
+                    vis_marker.color.g = ((ids_filt[idx] * 73) % 255) / 255.0;
+                    vis_marker.color.b = ((ids_filt[idx] * 113) % 255) / 255.0;
                     
                     // Set lifetime (0 = infinite)
                     vis_marker.lifetime.sec = 0;
                     vis_marker.lifetime.nanosec = 0;
                     
                     // Add text with marker ID
-                    vis_marker.text = std::to_string(ids[idx]);
+                    vis_marker.text = std::to_string(ids_filt[idx]);
                 }
                 
                 visualization_markers_pub_->publish(vis_marker_array);
+                }
             } else {
                 RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
                     "No ArUco markers detected in image");

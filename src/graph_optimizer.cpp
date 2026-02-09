@@ -12,6 +12,7 @@
 #include <gtsam/geometry/Pose3.h>
 
 #include <nav_msgs/msg/path.hpp>
+#include <visualization_msgs/msg/marker_array.hpp>
 #include <tf2_ros/transform_broadcaster.h>
 #include <tf2_ros/static_transform_broadcaster.h>
 #include <set>
@@ -25,6 +26,20 @@ using gtsam::symbol_shorthand::B; // Bias
 
 namespace aruco_slam_ailab {
 
+// 관측 pose의 yaw만 반전 (좌/우 회전 보정, 앞/뒤는 유지)
+static gtsam::Pose3 poseWithYawFlipped(const gtsam::Pose3& p) {
+    gtsam::Matrix3 R = p.rotation().matrix();
+    double yaw = std::atan2(R(1, 0), R(0, 0));
+    gtsam::Rot3 newRot = gtsam::Rot3::Rz(-2.0 * yaw) * p.rotation();
+    return gtsam::Pose3(newRot, p.translation());
+}
+
+// 관측 pose의 Y 반전 (base_link: X앞 Y왼쪽 → 카메라 좌우 반전 보정)
+static gtsam::Pose3 poseMirrorLeftRight(const gtsam::Pose3& p) {
+    const auto& t = p.translation();
+    return gtsam::Pose3(p.rotation(), gtsam::Point3(t.x(), -t.y(), t.z()));
+}
+
 class GraphOptimizer : public ParamServer {
 public:
     std::mutex mtx_;
@@ -37,6 +52,10 @@ public:
     // Publishers
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubGlobalOdometry_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubPath_;
+    rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pubLandmarks_;
+    rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pubKeyframes_;
+    rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pubOdometryEdges_;
+    rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pubLoopClosureEdges_;
 
     // TF
     std::unique_ptr<tf2_ros::TransformBroadcaster> tfBroadcaster_;
@@ -72,9 +91,13 @@ public:
     // Landmark tracking: marker_id -> landmark symbol key
     std::map<int, gtsam::Key> landmarkMap_;
 
+    // 관측 엣지 (키프레임–랜드마크): 루프 클로저 시각화용
+    std::vector<std::pair<int, gtsam::Key>> observationEdges_;
+
     // Keyframe tracking
     double lastKeyframeTime_ = -1.0;
     gtsam::Pose3 lastKeyframePose_;
+    std::set<int> markerIdsAtLastKeyframe_;  // 마커 등장/퇴장 감지용
 
     // Path for visualization
     nav_msgs::msg::Path globalPath_;
@@ -114,6 +137,10 @@ public:
         pubGlobalOdometry_ = create_publisher<nav_msgs::msg::Odometry>(
             "/odometry/global", 10);
         pubPath_ = create_publisher<nav_msgs::msg::Path>("/path", 10);
+        pubLandmarks_ = create_publisher<visualization_msgs::msg::MarkerArray>("/slam/landmarks", 10);
+        pubKeyframes_ = create_publisher<visualization_msgs::msg::MarkerArray>("/slam/keyframes", 10);
+        pubOdometryEdges_ = create_publisher<visualization_msgs::msg::MarkerArray>("/slam/odometry_edges", 10);
+        pubLoopClosureEdges_ = create_publisher<visualization_msgs::msg::MarkerArray>("/slam/loop_closure_edges", 10);
 
         // TF broadcaster
         tfBroadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(this);
@@ -153,7 +180,6 @@ public:
         
         // optical frame -> camera_link: inverse of xacro camera_color_optical_joint
         // Ref: hunter2_description/xacro/include/camera/d455.xacro
-        //      camera_color_optical_joint has rpy="${-M_PI/2} 0 ${-M_PI/2}" (camera_link -> optical)
         // So optical -> camera_link = RotZ(90)*RotX(90)
         gtsam::Rot3 rotZ90 = gtsam::Rot3::Rz(M_PI/2);
         gtsam::Rot3 rotX90 = gtsam::Rot3::Rx(M_PI/2);
@@ -273,6 +299,8 @@ public:
             publishOdometry(optimizedBasePose, latestImuOdom.header.stamp);
             publishTF(optimizedBasePose, latestImuOdom.header.stamp);
             updatePath(optimizedBasePose, latestImuOdom.header.stamp);
+            publishLandmarks(latestImuOdom.header.stamp);
+            publishGraphVisualization(latestImuOdom.header.stamp);
             
             // Update keyframe tracking for visualization
             lastKeyframeTime_ = currentTime;
@@ -339,6 +367,8 @@ public:
             publishOdometry(optimizedBasePose, stamp);
             publishTF(optimizedBasePose, stamp);
             updatePath(optimizedBasePose, stamp);
+            publishLandmarks(stamp);
+            publishGraphVisualization(stamp);
             
             // Update keyframe tracking for visualization
             lastKeyframeTime_ = currentTime;
@@ -409,32 +439,46 @@ public:
         }
     }
 
-    bool shouldCreateKeyframe(const nav_msgs::msg::Odometry& odom) {
+    // 키프레임 추가: 아래 조건 중 하나라도 만족하면 추가 (OR)
+    // - 첫 키프레임: 항상 첫 프레임은 키프레임
+    // - 시간 간격: keyframe_time_interval(기본 0.5초) 이상 경과
+    // - 움직임: 이전 키프레임 대비 거리 ≥ keyframe_distance_threshold(예: 0.1m) 또는 회전 ≥ keyframe_angle_threshold(예: 약 15°)
+    // - 마커 등장: 이전 키프레임에 없던 ArUco 마커 ID가 현재 프레임에 있음
+    // - 마커 퇴장: 이전 키프레임에 있던 마커 ID가 현재 프레임에 없음
+    bool shouldCreateKeyframe(const nav_msgs::msg::Odometry& odom,
+                              const std::set<int>& currentMarkerIds) {
         double currentTime = stamp2Sec(odom.header.stamp);
-        
+
         if (lastKeyframeTime_ < 0) {
-            return true;  // First keyframe
+            return true;  // 첫 키프레임
         }
 
-        // Time-based check
-        if (currentTime - lastKeyframeTime_ < keyframeTimeInterval) {
-            return false;
+        if (currentTime - lastKeyframeTime_ >= keyframeTimeInterval) {
+            return true;  // 시간 간격
         }
 
-        // Distance/angle-based check
         gtsam::Pose3 currentPose = poseMsgToGtsam(odom.pose.pose);
-        
         if (keyframeIdx_ > 0) {
             gtsam::Pose3 delta = lastKeyframePose_.between(currentPose);
             double dist = delta.translation().norm();
-            double angle = delta.rotation().axisAngle().second;  // angle in radians
-
-            if (dist < keyframeDistanceThreshold && angle < keyframeAngleThreshold) {
-                return false;
+            double angle = delta.rotation().axisAngle().second;
+            if (dist >= keyframeDistanceThreshold || angle >= keyframeAngleThreshold) {
+                return true;  // 움직임
             }
         }
 
-        return true;
+        for (int id : currentMarkerIds) {
+            if (markerIdsAtLastKeyframe_.count(id) == 0) {
+                return true;  // 마커 등장
+            }
+        }
+        for (int id : markerIdsAtLastKeyframe_) {
+            if (currentMarkerIds.count(id) == 0) {
+                return true;  // 마커 퇴장
+            }
+        }
+
+        return false;
     }
 
     void processKeyframes() {
@@ -442,12 +486,30 @@ public:
             return;
         }
 
-        // Get latest IMU odometry
         nav_msgs::msg::Odometry latestImuOdom = imuOdomQueue_.back();
-        
-        if (!shouldCreateKeyframe(latestImuOdom)) {
+        double keyframeTime = stamp2Sec(latestImuOdom.header.stamp);
+
+        // 현재 시각에 가장 가까운 ArUco 관측에서 마커 ID 집합 구하기 (마커 등장/퇴장 판단용)
+        std::set<int> currentMarkerIds;
+        const aruco_slam_ailab::msg::MarkerArray* closestMarkerArray = nullptr;
+        double minTimeDiff = std::numeric_limits<double>::max();
+        for (const auto& markerArray : arucoQueue_) {
+            double obsTime = stamp2Sec(markerArray.header.stamp);
+            double timeDiff = std::abs(obsTime - keyframeTime);
+            if (timeDiff < minTimeDiff && timeDiff <= 0.2) {
+                minTimeDiff = timeDiff;
+                closestMarkerArray = &markerArray;
+            }
+        }
+        if (closestMarkerArray) {
+            for (const auto& m : closestMarkerArray->markers) {
+                currentMarkerIds.insert(m.id);
+            }
+        }
+
+        if (!shouldCreateKeyframe(latestImuOdom, currentMarkerIds)) {
             if (enableTopicDebugLog && systemInitialized_) {
-                double currentTime = stamp2Sec(latestImuOdom.header.stamp);
+                double currentTime = keyframeTime;
                 gtsam::Pose3 currentPose = poseMsgToGtsam(latestImuOdom.pose.pose);
                 if (lastKeyframeTime_ >= 0) {
                     gtsam::Pose3 delta = lastKeyframePose_.between(currentPose);
@@ -459,30 +521,22 @@ public:
                         dist, keyframeDistanceThreshold, angle, keyframeAngleThreshold);
                 }
             }
-            if (enableTopicDebugLog && systemInitialized_) {
-                RCLCPP_DEBUG_THROTTLE(get_logger(), *get_clock(), 2000,
-                    "[GraphOpt] Skipping keyframe: time_interval=%.3f, dist=%.3f, angle=%.3f",
-                    stamp2Sec(latestImuOdom.header.stamp) - lastKeyframeTime_,
-                    (lastKeyframePose_.between(poseMsgToGtsam(latestImuOdom.pose.pose))).translation().norm(),
-                    (lastKeyframePose_.between(poseMsgToGtsam(latestImuOdom.pose.pose))).rotation().axisAngle().second);
-            }
             return;
         }
 
-        double keyframeTime = stamp2Sec(latestImuOdom.header.stamp);
         gtsam::Pose3 keyframePose = poseMsgToGtsam(latestImuOdom.pose.pose);
 
-        // Initialize system if needed
         if (!systemInitialized_) {
-            initializeSystem(keyframePose, latestImuOdom);
+            // 초기 pose 고정: (0, 0, 0) + identity
+            initializeSystem(gtsam::Pose3(), latestImuOdom);
+            markerIdsAtLastKeyframe_ = currentMarkerIds;
             return;
         }
 
-        // Add new keyframe
         addKeyframe(keyframeTime, keyframePose, latestImuOdom);
-
         lastKeyframeTime_ = keyframeTime;
         lastKeyframePose_ = keyframePose;
+        markerIdsAtLastKeyframe_ = currentMarkerIds;
     }
 
     // Initialize system from first ArUco marker observation
@@ -510,37 +564,10 @@ public:
             latestImuOdom = imuOdomQueue_.back();
         }
         
-        // Use first marker (assume marker ID 0 is at origin, or use first marker as reference)
-        const auto& firstMarker = markerArray.markers[0];
-        geometry_msgs::msg::Pose markerPoseMsg = firstMarker.pose;
+        // 초기 pose 고정: 항상 (0, 0, 0) 위치 + identity 자세 (0 0 0 0 0 0 0)
+        gtsam::Pose3 initialBasePose = gtsam::Pose3();
         
-        // Convert observation to base_link frame
-        gtsam::Pose3 markerObsBase;
-        if (arucoObservationFrame == "camera") {
-            // Observation is in OpenCV optical frame, convert to base_link
-            // T_base_marker = T_base_cam * T_cam_optical * T_optical_marker
-            // First convert from optical to camera_link, then to base_link
-            gtsam::Pose3 markerObsOptical = poseMsgToGtsam(markerPoseMsg);
-            gtsam::Pose3 markerObsCameraLink = opticalToCameraLink_.compose(markerObsOptical);
-            markerObsBase = baseToCam_.compose(markerObsCameraLink);
-        } else {
-            // Observation is already in base_link frame
-            markerObsBase = poseMsgToGtsam(markerPoseMsg);
-        }
-        
-        // Assume first marker (ID 0) is at origin in map frame
-        // If marker is at origin, then robot pose = -markerObsBase (inverse)
-        // T_map_base = T_map_marker * T_marker_base = identity * markerObsBase.inverse()
-        gtsam::Pose3 initialBasePose = markerObsBase.inverse();
-        
-        // If marker ID is not 0, we can't assume it's at origin
-        // For now, use identity pose and let optimization correct it
-        if (firstMarker.id != 0) {
-            RCLCPP_WARN(get_logger(), "[GraphOpt] First marker ID=%d (not 0), using identity pose. Consider using marker ID 0 at origin.", firstMarker.id);
-            initialBasePose = gtsam::Pose3();  // Identity
-        }
-        
-        RCLCPP_INFO(get_logger(), "[GraphOpt] Initializing from first ArUco marker (ID=%d)", firstMarker.id);
+        RCLCPP_INFO(get_logger(), "[GraphOpt] Initializing with fixed initial pose (0, 0, 0, 0, 0, 0)");
         initializeSystem(initialBasePose, latestImuOdom);
     }
 
@@ -675,6 +702,8 @@ public:
         publishOdometry(optimizedBasePose, odom.header.stamp);
         publishTF(optimizedBasePose, odom.header.stamp);
         updatePath(optimizedBasePose, odom.header.stamp);
+        publishLandmarks(odom.header.stamp);
+        publishGraphVisualization(odom.header.stamp);
 
         keyframeIdx_++;
 
@@ -744,6 +773,8 @@ public:
                     gtsam::Pose3 markerObsOptical = poseMsgToGtsam(markerPoseMsg);
                     gtsam::Pose3 markerObsCameraLink = opticalToCameraLink_.compose(markerObsOptical);
                     markerObsBase = baseToCam_.compose(markerObsCameraLink);
+                    markerObsBase = poseWithYawFlipped(markerObsBase);   // 좌/우 회전 보정
+                    markerObsBase = poseMirrorLeftRight(markerObsBase);  // 카메라 좌우 반전 보정
                 } else {
                     // Observation is already in base_link frame
                     markerObsBase = poseMsgToGtsam(markerPoseMsg);
@@ -761,6 +792,7 @@ public:
                     
                     graphFactors_.add(gtsam::BetweenFactor<gtsam::Pose3>(
                         X(keyframeIdx), landmarkKey, relativePose, arucoObsNoise_));
+                    observationEdges_.emplace_back(keyframeIdx, landmarkKey);
 
                     loopClosuresAdded++;
                     if (enableTopicDebugLog) {
@@ -781,6 +813,7 @@ public:
                     // Add observation factor
                     graphFactors_.add(gtsam::BetweenFactor<gtsam::Pose3>(
                         X(keyframeIdx), landmarkKey, markerObsBase, arucoObsNoise_));
+                    observationEdges_.emplace_back(keyframeIdx, landmarkKey);
 
                     newLandmarksAdded++;
                     RCLCPP_INFO(get_logger(), "[GraphOpt] Added new landmark ID=%d at keyframe %d (total landmarks: %zu, pose: [%.3f, %.3f, %.3f])", 
@@ -848,11 +881,11 @@ public:
     void updatePath(const gtsam::Pose3& pose, const rclcpp::Time& stamp) {
         geometry_msgs::msg::PoseStamped poseStamped;
         poseStamped.header.stamp = stamp;
-        poseStamped.header.frame_id = mapFrame;
+        poseStamped.header.frame_id = odomFrame;  // SLAM 세계 좌표 = odom (odom->base_link TF와 일치)
         poseStamped.pose = gtsamToPoseMsg(pose);
 
         globalPath_.header.stamp = stamp;
-        globalPath_.header.frame_id = mapFrame;
+        globalPath_.header.frame_id = odomFrame;
         globalPath_.poses.push_back(poseStamped);
 
         // Keep path size reasonable
@@ -861,6 +894,170 @@ public:
         }
 
         pubPath_->publish(globalPath_);
+    }
+
+    void publishLandmarks(const rclcpp::Time& stamp) {
+        visualization_msgs::msg::MarkerArray arr;
+        if (landmarkMap_.empty()) {
+            pubLandmarks_->publish(arr);
+            return;
+        }
+        gtsam::Values est;
+        try {
+            est = isam_.calculateEstimate();
+        } catch (...) {
+            pubLandmarks_->publish(arr);
+            return;
+        }
+        for (const auto& [markerId, landmarkKey] : landmarkMap_) {
+            if (!est.exists(landmarkKey)) continue;
+            gtsam::Pose3 pose = est.at<gtsam::Pose3>(landmarkKey);
+            geometry_msgs::msg::Pose poseMsg = gtsamToPoseMsg(pose);
+
+            // 랜드마크: odom 좌표계 (SLAM 세계 좌표, odom->base_link TF와 일치)
+            visualization_msgs::msg::Marker cube;
+            cube.header.stamp = stamp;
+            cube.header.frame_id = odomFrame;
+            cube.ns = "landmarks";
+            cube.id = markerId;
+            cube.type = visualization_msgs::msg::Marker::CUBE;
+            cube.action = visualization_msgs::msg::Marker::ADD;
+            cube.pose = poseMsg;
+            cube.scale.x = 0.28;
+            cube.scale.y = 0.28;
+            cube.scale.z = 0.04;
+            cube.color.r = 0.2f;
+            cube.color.g = 0.6f;
+            cube.color.b = 1.0f;
+            cube.color.a = 0.9f;
+            cube.lifetime = rclcpp::Duration(0, 0);
+            arr.markers.push_back(cube);
+
+            // ID 텍스트 (마커 위쪽에 표시)
+            visualization_msgs::msg::Marker text;
+            text.header.stamp = stamp;
+            text.header.frame_id = odomFrame;
+            text.ns = "landmark_ids";
+            text.id = markerId;
+            text.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
+            text.action = visualization_msgs::msg::Marker::ADD;
+            text.pose = poseMsg;
+            text.pose.position.z += 0.18;
+            text.scale.z = 0.42;
+            text.color.r = 0.0f;   // 형광 라임
+            text.color.g = 1.0f;
+            text.color.b = 0.4f;
+            text.color.a = 1.0f;
+            text.text = std::to_string(markerId);
+            text.lifetime = rclcpp::Duration(0, 0);
+            arr.markers.push_back(text);
+        }
+        pubLandmarks_->publish(arr);
+    }
+
+    void publishGraphVisualization(const rclcpp::Time& stamp) {
+        gtsam::Values est;
+        try {
+            est = isam_.calculateEstimate();
+        } catch (...) {
+            return;
+        }
+
+        // Pose 노드 개수: X(0), X(1), ... 존재하는 최대 인덱스+1
+        int numPoseNodes = 0;
+        while (est.exists(X(numPoseNodes))) {
+            numPoseNodes++;
+        }
+        if (numPoseNodes == 0) return;
+
+        const gtsam::Pose3 imuToBase = baseToImu_.inverse();
+
+        // ----- 1) 키프레임 노드 (로봇이 있었던 시점의 위치: 구체)
+        visualization_msgs::msg::MarkerArray keyframeArr;
+        for (int i = 0; i < numPoseNodes; i++) {
+            gtsam::Pose3 imuPose = est.at<gtsam::Pose3>(X(i));
+            gtsam::Pose3 basePose = imuPose.compose(imuToBase);
+            gtsam::Point3 t = basePose.translation();
+
+            visualization_msgs::msg::Marker node;
+            node.header.stamp = stamp;
+            node.header.frame_id = odomFrame;
+            node.ns = "keyframes";
+            node.id = i;
+            node.type = visualization_msgs::msg::Marker::SPHERE;
+            node.action = visualization_msgs::msg::Marker::ADD;
+            node.pose.position.x = t.x();
+            node.pose.position.y = t.y();
+            node.pose.position.z = t.z();
+            node.pose.orientation.w = 1.0;
+            node.scale.x = node.scale.y = node.scale.z = 0.08;
+            node.color.r = 0.0f;
+            node.color.g = 0.8f;
+            node.color.b = 0.0f;
+            node.color.a = 0.9f;
+            node.lifetime = rclcpp::Duration(0, 0);
+            keyframeArr.markers.push_back(node);
+        }
+        pubKeyframes_->publish(keyframeArr);
+
+        // ----- 2) 오도메트리 엣지 (인접 노드 사이 선)
+        visualization_msgs::msg::MarkerArray odomArr;
+        visualization_msgs::msg::Marker lineOdom;
+        lineOdom.header.stamp = stamp;
+        lineOdom.header.frame_id = odomFrame;
+        lineOdom.ns = "odometry_edges";
+        lineOdom.id = 0;
+        lineOdom.type = visualization_msgs::msg::Marker::LINE_LIST;
+        lineOdom.action = visualization_msgs::msg::Marker::ADD;
+        lineOdom.scale.x = 0.03;
+        lineOdom.color.r = 0.2f;
+        lineOdom.color.g = 0.6f;
+        lineOdom.color.b = 1.0f;
+        lineOdom.color.a = 0.9f;
+        lineOdom.lifetime = rclcpp::Duration(0, 0);
+        for (int i = 0; i + 1 < numPoseNodes; i++) {
+            gtsam::Point3 p0 = est.at<gtsam::Pose3>(X(i)).compose(imuToBase).translation();
+            gtsam::Point3 p1 = est.at<gtsam::Pose3>(X(i + 1)).compose(imuToBase).translation();
+            geometry_msgs::msg::Point pt0, pt1;
+            pt0.x = p0.x(); pt0.y = p0.y(); pt0.z = p0.z();
+            pt1.x = p1.x(); pt1.y = p1.y(); pt1.z = p1.z();
+            lineOdom.points.push_back(pt0);
+            lineOdom.points.push_back(pt1);
+        }
+        if (!lineOdom.points.empty()) {
+            odomArr.markers.push_back(lineOdom);
+        }
+        pubOdometryEdges_->publish(odomArr);
+
+        // ----- 3) 루프 클로저(관측) 엣지 (키프레임–랜드마크 선)
+        visualization_msgs::msg::MarkerArray loopArr;
+        visualization_msgs::msg::Marker lineLoop;
+        lineLoop.header.stamp = stamp;
+        lineLoop.header.frame_id = odomFrame;
+        lineLoop.ns = "loop_closure_edges";
+        lineLoop.id = 0;
+        lineLoop.type = visualization_msgs::msg::Marker::LINE_LIST;
+        lineLoop.action = visualization_msgs::msg::Marker::ADD;
+        lineLoop.scale.x = 0.02;
+        lineLoop.color.r = 1.0f;
+        lineLoop.color.g = 0.4f;
+        lineLoop.color.b = 0.0f;
+        lineLoop.color.a = 0.7f;
+        lineLoop.lifetime = rclcpp::Duration(0, 0);
+        for (const auto& [kfIdx, lkKey] : observationEdges_) {
+            if (!est.exists(X(kfIdx)) || !est.exists(lkKey)) continue;
+            gtsam::Point3 pk = est.at<gtsam::Pose3>(X(kfIdx)).compose(imuToBase).translation();
+            gtsam::Point3 pl = est.at<gtsam::Pose3>(lkKey).translation();
+            geometry_msgs::msg::Point pt0, pt1;
+            pt0.x = pk.x(); pt0.y = pk.y(); pt0.z = pk.z();
+            pt1.x = pl.x(); pt1.y = pl.y(); pt1.z = pl.z();
+            lineLoop.points.push_back(pt0);
+            lineLoop.points.push_back(pt1);
+        }
+        if (!lineLoop.points.empty()) {
+            loopArr.markers.push_back(lineLoop);
+        }
+        pubLoopClosureEdges_->publish(loopArr);
     }
 };
 

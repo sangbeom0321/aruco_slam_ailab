@@ -5,12 +5,13 @@
     wheel_odom_topic: "/wheel_odom"
     aruco_poses_topic: "/aruco_poses"
 
-    # Frames
+    # Frames (TF: odom -> base_link -> camera)
+    # Path와 랜드마크는 SLAM 세계 좌표계인 odom_frame에 퍼블리시 (RViz Fixed Frame = odom 권장)
     base_link_frame: "base_link"
     imu_frame: "imu_link"
     camera_frame: "camera_link"
     odom_frame: "odom"
-    map_frame: "map"
+    map_frame: "map"   # 미사용; path/landmarks는 odom_frame 사용
 
     # IMU noise parameters
     imu_acc_noise: 0.01          # m/s^2
@@ -44,10 +45,15 @@
     aruco_trans_noise: 0.05        # meters
     aruco_rot_noise: 0.1           # radians
 
-    # Keyframe policy
-    keyframe_time_interval: 0.1    # seconds
-    keyframe_distance_threshold: 0.5  # meters
-    keyframe_angle_threshold: 0.2    # radians
+    # Keyframe policy: 아래 조건 중 하나라도 만족하면 키프레임 추가 (OR)
+    # - 첫 키프레임: 항상 첫 프레임은 키프레임
+    # - 시간 간격: keyframe_time_interval 이상 경과
+    # - 움직임: 거리 ≥ keyframe_distance_threshold 또는 회전 ≥ keyframe_angle_threshold
+    # - 마커 등장: 이전 키프레임에 없던 ArUco 마커 ID가 현재 프레임에 있음
+    # - 마커 퇴장: 이전 키프레임에 있던 마커 ID가 현재 프레임에 없음
+    keyframe_time_interval: 0.5      # seconds
+    keyframe_distance_threshold: 0.1 # meters (예: 10cm 이상 이동)
+    keyframe_angle_threshold: 0.26   # radians (예: 약 15도 이상 회전)
 
     # ISAM2 parameters
     isam_relinearize_threshold: 0.1
