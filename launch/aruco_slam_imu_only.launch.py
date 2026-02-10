@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-# Vision-only SLAM: ArUco detector + graph_optimizer (use_imu=False).
-# 매 ArUco 메시지마다 프레임 노드 추가 및 랜드마크 관측 반복 갱신 → /aruco_markers와 /slam/landmarks 비교 시 Fixed Frame = camera_color_optical_frame 권장.
+# IMU only 모드: ArUco/휠 오도메트리 없이 IMU 사전적분만으로 경향 확인 (발산 예상)
 
 from os.path import join
 from ament_index_python.packages import get_package_share_directory
@@ -20,64 +19,56 @@ def generate_launch_description():
         default_value='true',
         description='Use simulation time'
     )
-    
-    marker_size_arg = DeclareLaunchArgument(
-        'marker_size',
-        default_value='0.30',
-        description='ArUco marker size in meters'
-    )
 
     enable_topic_debug_log_arg = DeclareLaunchArgument(
         'enable_topic_debug_log',
         default_value='true',
-        description='Enable topic receive debug logs (aruco) for diagnostics'
+        description='Enable topic receive debug logs (IMU) for diagnostics'
     )
-    
+
     # Launch configurations
     use_sim_time = LaunchConfiguration('use_sim_time')
-    marker_size = LaunchConfiguration('marker_size')
     enable_topic_debug_log = LaunchConfiguration('enable_topic_debug_log', default='true')
 
-    # ArUco detector node for front camera (C++ version)
-    # Directly publishes aruco_slam_ailab/msg/MarkerArray for SLAM backend
-    aruco_detector_front = Node(
+    # IMU 사전적분: /imu -> /odometry/imu_incremental
+    imu_preintegration_node = Node(
         package='aruco_slam_ailab',
-        executable='aruco_detector_node',
-        name='aruco_detector_front',
+        executable='imu_preintegration',
+        name='imu_preintegration',
         output='screen',
-        parameters=[
-            {'use_sim_time': use_sim_time},
-            {'camera_topic': '/camera/rgb/image_raw'},
-            {'camera_info_topic': '/camera/rgb/camera_info'},
-            {'marker_size': marker_size},
-            {'aruco_dict_type': 'DICT_4X4_50'},
-        ],
+        parameters=[config_file, {'use_sim_time': use_sim_time, 'enable_topic_debug_log': enable_topic_debug_log}],
         remappings=[
-            ('/aruco_poses', '/aruco_poses'),  # Direct output for SLAM backend
-            ('/aruco_debug_image', '/aruco_debug_image_front')
+            ('/imu', '/camera/imu'),
+            ('/odometry/imu_incremental', '/odometry/imu_incremental'),
         ]
     )
 
-    # SLAM Backend (Vision-only: Graph Optimizer without IMU)
+    # SLAM Backend (IMU only: no vision, no wheel odom)
+    # 키프레임( factor ) 추가는 0.1초에 한 번만 (IMU only 시 그래프/연산 부담 완화)
     graph_optimizer_node = Node(
         package='aruco_slam_ailab',
         executable='graph_optimizer',
         name='graph_optimizer',
         output='screen',
         parameters=[
-            config_file, 
-            {'use_sim_time': use_sim_time, 
-             'enable_topic_debug_log': enable_topic_debug_log,
-             'use_imu': False}  # Disable IMU for vision-only mode
+            config_file,
+            {
+                'use_sim_time': use_sim_time,
+                'enable_topic_debug_log': enable_topic_debug_log,
+                'use_imu': True,
+                'use_wheel_odom': False,
+                'keyframe_time_interval': 0.1,  # IMU only: 0.1초에 한 번만 factor 추가
+            }
         ],
         remappings=[
-            ('/aruco_poses', '/aruco_poses'),  # Needs MarkerArray from detector
+            ('/odometry/imu_incremental', '/odometry/imu_incremental'),
+            ('/aruco_poses', '/aruco_poses'),
             ('/odometry/global', '/odometry/global'),
             ('/path', '/path'),
         ]
     )
 
-    # Static TF: map -> odom (identity; new-style args to avoid deprecation warning)
+    # Static TF: map -> odom
     static_tf_map_odom = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
@@ -87,7 +78,7 @@ def generate_launch_description():
         output='screen'
     )
 
-    # RViz node with aruco_viz.rviz config
+    # RViz
     rviz_config = join(pkg_share_aruco, 'rviz', 'aruco_viz.rviz')
     rviz_node = Node(
         package='rviz2',
@@ -100,9 +91,8 @@ def generate_launch_description():
 
     return LaunchDescription([
         use_sim_time_arg,
-        marker_size_arg,
         enable_topic_debug_log_arg,
-        aruco_detector_front,
+        imu_preintegration_node,
         graph_optimizer_node,
         static_tf_map_odom,
         rviz_node

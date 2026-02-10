@@ -81,7 +81,9 @@ public:
     Eigen::Matrix3d extRotBaseImu;
     Eigen::Vector3d extTransBaseCam;
     Eigen::Matrix3d extRotBaseCam;
-    
+    Eigen::Vector3d extTransBaseDepthCam;
+    Eigen::Matrix3d extRotBaseDepthCam;
+
     // Wheel odometry parameters
     double wheelOdomTransNoise;
     double wheelOdomRotNoise;
@@ -99,7 +101,7 @@ public:
     double keyframeTimeInterval;  // seconds
     double keyframeDistanceThreshold;  // meters
     double keyframeAngleThreshold;  // radians
-    
+
     // ISAM2 parameters
     double isamRelinearizeThreshold;
     int isamRelinearizeSkip;
@@ -155,16 +157,24 @@ public:
         declare_parameter("ext_rot_base_imu", ext_rot_base_imu_v);
         declare_parameter("ext_trans_base_cam", ext_trans_base_cam_v);
         declare_parameter("ext_rot_base_cam", ext_rot_base_cam_v);
-        
+        std::vector<double> ext_trans_base_depth_cam_v = {0.411, 0.011, 0.037};
+        std::vector<double> ext_rot_base_depth_cam_v = {0.0, 0.0, 1.0, -1.0, 0.0, 0.0, 0.0, -1.0, 0.0};
+        declare_parameter("ext_trans_base_depth_cam", ext_trans_base_depth_cam_v);
+        declare_parameter("ext_rot_base_depth_cam", ext_rot_base_depth_cam_v);
+
         get_parameter("ext_trans_base_imu", ext_trans_base_imu_v);
         get_parameter("ext_rot_base_imu", ext_rot_base_imu_v);
         get_parameter("ext_trans_base_cam", ext_trans_base_cam_v);
         get_parameter("ext_rot_base_cam", ext_rot_base_cam_v);
-        
+        get_parameter("ext_trans_base_depth_cam", ext_trans_base_depth_cam_v);
+        get_parameter("ext_rot_base_depth_cam", ext_rot_base_depth_cam_v);
+
         extTransBaseImu = Eigen::Map<const Eigen::Vector3d>(ext_trans_base_imu_v.data());
         extRotBaseImu = Eigen::Map<const Eigen::Matrix<double, 3, 3, Eigen::RowMajor>>(ext_rot_base_imu_v.data(), 3, 3);
         extTransBaseCam = Eigen::Map<const Eigen::Vector3d>(ext_trans_base_cam_v.data());
         extRotBaseCam = Eigen::Map<const Eigen::Matrix<double, 3, 3, Eigen::RowMajor>>(ext_rot_base_cam_v.data(), 3, 3);
+        extTransBaseDepthCam = Eigen::Map<const Eigen::Vector3d>(ext_trans_base_depth_cam_v.data());
+        extRotBaseDepthCam = Eigen::Map<const Eigen::Matrix<double, 3, 3, Eigen::RowMajor>>(ext_rot_base_depth_cam_v.data(), 3, 3);
         
         // IMU usage flag
         declare_parameter("use_imu", true);
@@ -192,11 +202,11 @@ public:
         declare_parameter("keyframe_time_interval", 0.1);
         declare_parameter("keyframe_distance_threshold", 0.5);
         declare_parameter("keyframe_angle_threshold", 0.2);
-        
+
         get_parameter("keyframe_time_interval", keyframeTimeInterval);
         get_parameter("keyframe_distance_threshold", keyframeDistanceThreshold);
         get_parameter("keyframe_angle_threshold", keyframeAngleThreshold);
-        
+
         // ISAM2 parameters
         declare_parameter("isam_relinearize_threshold", 0.1);
         declare_parameter("isam_relinearize_skip", 1);

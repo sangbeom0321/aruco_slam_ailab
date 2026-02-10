@@ -5,6 +5,7 @@
 #include "aruco_slam_ailab/msg/marker_observation.hpp"
 #include <visualization_msgs/msg/marker_array.hpp>
 #include <visualization_msgs/msg/marker.hpp>
+#include <geometry_msgs/msg/point.hpp>
 #include <cv_bridge/cv_bridge.h>
 #include <opencv2/opencv.hpp>
 #include <opencv2/aruco.hpp>
@@ -15,18 +16,23 @@
 #include <map>
 #include <set>
 #include <cmath>
+#include <mutex>
 
 class ArucoDetectorNode : public rclcpp::Node {
 public:
     ArucoDetectorNode() : Node("aruco_detector_node") {
         // Parameters
-        declare_parameter("camera_topic", "/kinect_camera/kinect_camera/image_raw");
-        declare_parameter("camera_info_topic", "/kinect_camera/kinect_camera/camera_info");
+        declare_parameter("camera_topic", "/camera/rgb/image_raw");
+        declare_parameter("camera_info_topic", "/camera/rgb/camera_info");
+        declare_parameter("depth_topic", "/camera/depth/depth/image_raw");
+        declare_parameter("depth_camera_info_topic", "/camera/depth/depth/camera_info");
         declare_parameter("marker_size", 0.30);
         declare_parameter("aruco_dict_type", "DICT_4X4_50");
 
         std::string camera_topic = get_parameter("camera_topic").as_string();
         std::string camera_info_topic = get_parameter("camera_info_topic").as_string();
+        std::string depth_topic = get_parameter("depth_topic").as_string();
+        std::string depth_camera_info_topic = get_parameter("depth_camera_info_topic").as_string();
         marker_size_ = get_parameter("marker_size").as_double();
         std::string aruco_dict_type = get_parameter("aruco_dict_type").as_string();
 
@@ -47,6 +53,14 @@ public:
             camera_info_topic, 10,
             std::bind(&ArucoDetectorNode::cameraInfoCallback, this, std::placeholders::_1));
 
+        depth_image_sub_ = create_subscription<sensor_msgs::msg::Image>(
+            depth_topic, 10,
+            std::bind(&ArucoDetectorNode::depthImageCallback, this, std::placeholders::_1));
+
+        depth_camera_info_sub_ = create_subscription<sensor_msgs::msg::CameraInfo>(
+            depth_camera_info_topic, 10,
+            std::bind(&ArucoDetectorNode::depthCameraInfoCallback, this, std::placeholders::_1));
+
         // Publishers
         // Publish custom MarkerArray directly for SLAM backend
         aruco_poses_pub_ = create_publisher<aruco_slam_ailab::msg::MarkerArray>(
@@ -59,6 +73,7 @@ public:
 
         RCLCPP_INFO(get_logger(), "ArUco Detector Node started");
         RCLCPP_INFO(get_logger(), "  Camera topic: %s", camera_topic.c_str());
+        RCLCPP_INFO(get_logger(), "  Depth topic: %s", depth_topic.c_str());
         RCLCPP_INFO(get_logger(), "  Marker size: %.2f m", marker_size_);
         RCLCPP_INFO(get_logger(), "  ArUco dictionary: %s", aruco_dict_type.c_str());
     }
@@ -111,6 +126,57 @@ private:
 
             RCLCPP_INFO(get_logger(), "Camera intrinsics received. Frame: %s", camera_frame_.c_str());
         }
+    }
+
+    void depthImageCallback(const sensor_msgs::msg::Image::SharedPtr msg) {
+        try {
+            std::lock_guard<std::mutex> lock(depth_mutex_);
+            if (msg->encoding == sensor_msgs::image_encodings::TYPE_16UC1) {
+                latest_depth_image_ = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::TYPE_16UC1)->image;
+            } else if (msg->encoding == sensor_msgs::image_encodings::TYPE_32FC1) {
+                latest_depth_image_ = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::TYPE_32FC1)->image;
+            } else {
+                RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
+                    "Depth image encoding not supported: %s (use 16UC1 or 32FC1)", msg->encoding.c_str());
+                return;
+            }
+            depth_image_valid_ = true;
+        } catch (const cv_bridge::Exception& e) {
+            RCLCPP_ERROR(get_logger(), "depth cv_bridge: %s", e.what());
+        }
+    }
+
+    void depthCameraInfoCallback(const sensor_msgs::msg::CameraInfo::SharedPtr msg) {
+        (void)msg;
+        if (!depth_camera_info_received_) {
+            depth_camera_info_received_ = true;
+            RCLCPP_INFO(get_logger(), "Depth camera info received");
+        }
+    }
+
+    // RGB 이미지 좌표 (cx, cy)를 depth 이미지에서 샘플링. 깊이 해상도가 다를 수 있음.
+    // 반환: 미터 단위 깊이. 유효하지 않으면 -1.0
+    double sampleDepthAtMarkerCenter(const cv::Mat& depth, int rgb_cols, int rgb_rows,
+                                      const std::vector<cv::Point2f>& corners) {
+        if (depth.empty() || rgb_cols <= 0 || rgb_rows <= 0) return -1.0;
+        float cx = 0, cy = 0;
+        for (const auto& p : corners) { cx += p.x; cy += p.y; }
+        cx /= 4.0f; cy /= 4.0f;
+        int du = static_cast<int>(cx * depth.cols / rgb_cols);
+        int dv = static_cast<int>(cy * depth.rows / rgb_rows);
+        if (du < 0 || du >= depth.cols || dv < 0 || dv >= depth.rows) return -1.0;
+
+        double z_m = -1.0;
+        if (depth.type() == CV_16UC1) {
+            uint16_t v = depth.at<uint16_t>(dv, du);
+            if (v == 0) return -1.0;
+            z_m = v * 0.001;  // mm -> m
+        } else if (depth.type() == CV_32FC1) {
+            float v = depth.at<float>(dv, du);
+            if (std::isnan(v) || v <= 0.0f) return -1.0;
+            z_m = static_cast<double>(v);
+        }
+        return z_m;
     }
 
     void imageCallback(const sensor_msgs::msg::Image::SharedPtr msg) {
@@ -173,6 +239,48 @@ private:
                     cv::Vec3d tvec = tvecs_filt[idx];
                     int marker_id = ids_filt[idx];
 
+                    // Depth 추정 정확도 로그: 재투영 오차 + RGB(ArUco) 추정 vs 센서 깊이
+                    {
+                        // 마커 3D 코너 (마커 좌표계)
+                        std::vector<cv::Point3f> obj_pts = {
+                            cv::Point3f(-marker_size_/2,  marker_size_/2, 0),
+                            cv::Point3f( marker_size_/2,  marker_size_/2, 0),
+                            cv::Point3f( marker_size_/2, -marker_size_/2, 0),
+                            cv::Point3f(-marker_size_/2, -marker_size_/2, 0)
+                        };
+                        std::vector<cv::Point2f> proj_pts;
+                        cv::projectPoints(obj_pts, rvec, tvec, camera_matrix_, dist_coeffs_, proj_pts);
+                        double err_sum = 0;
+                        for (size_t k = 0; k < 4; ++k) {
+                            double dx = proj_pts[k].x - corners_filt[idx][k].x;
+                            double dy = proj_pts[k].y - corners_filt[idx][k].y;
+                            err_sum += dx*dx + dy*dy;
+                        }
+                        double reproj_error_px = std::sqrt(err_sum / 4.0);
+                        double depth_aruco = tvec[2];
+
+                        cv::Mat depth_for_sample;
+                        {
+                            std::lock_guard<std::mutex> lock(depth_mutex_);
+                            if (depth_image_valid_ && !latest_depth_image_.empty())
+                                depth_for_sample = latest_depth_image_.clone();
+                        }
+                        double depth_sensor = sampleDepthAtMarkerCenter(
+                            depth_for_sample, cv_image.cols, cv_image.rows, corners_filt[idx]);
+
+                        if (depth_sensor > 0.0) {
+                            double err_m = depth_aruco - depth_sensor;
+                            double err_pct = (depth_sensor > 1e-6) ? (100.0 * err_m / depth_sensor) : 0.0;
+                            RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000,
+                                "[Depth accuracy] id=%d | ArUco(RGB)=%.3f m | sensor=%.3f m | err=%.3f m (%.1f%%) | reproj=%.2f px",
+                                marker_id, depth_aruco, depth_sensor, err_m, err_pct, reproj_error_px);
+                        } else {
+                            RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000,
+                                "[Depth] id=%d | ArUco(RGB)=%.3f m | sensor=invalid | reproj_err=%.2f px",
+                                marker_id, depth_aruco, reproj_error_px);
+                        }
+                    }
+
                     // Draw axis on debug image
                     cv::drawFrameAxes(debug_image, camera_matrix_, dist_coeffs_,
                                      rvec, tvec, marker_size_ * 0.5);
@@ -202,40 +310,122 @@ private:
                 // Publish custom MarkerArray directly for SLAM backend
                 aruco_poses_pub_->publish(marker_array);
                 
-                // Publish visualization markers for RViz (0~9만)
+                // Publish 3D visualization for RViz: 큐브(마커 평면) + 구(위치) + 축 + ID 텍스트
                 visualization_msgs::msg::MarkerArray vis_marker_array;
-                vis_marker_array.markers.resize(ids_filt.size());
-                
-                for (size_t idx = 0; idx < ids_filt.size(); ++idx) {
-                    visualization_msgs::msg::Marker& vis_marker = vis_marker_array.markers[idx];
-                    vis_marker.header = marker_array.header;
-                    vis_marker.ns = "aruco_markers";
-                    vis_marker.id = ids_filt[idx];
-                    vis_marker.type = visualization_msgs::msg::Marker::CUBE;
-                    vis_marker.action = visualization_msgs::msg::Marker::ADD;
-                    
-                    // Use the same pose as the observation
-                    vis_marker.pose = marker_array.markers[idx].pose;
-                    
-                    // Set marker size (cube)
-                    vis_marker.scale.x = marker_size_;
-                    vis_marker.scale.y = marker_size_;
-                    vis_marker.scale.z = 0.01;  // Thin cube
-                    
-                    // Set color based on marker ID
-                    vis_marker.color.a = 0.7;
-                    vis_marker.color.r = ((ids_filt[idx] * 37) % 255) / 255.0;
-                    vis_marker.color.g = ((ids_filt[idx] * 73) % 255) / 255.0;
-                    vis_marker.color.b = ((ids_filt[idx] * 113) % 255) / 255.0;
-                    
-                    // Set lifetime (0 = infinite)
-                    vis_marker.lifetime.sec = 0;
-                    vis_marker.lifetime.nanosec = 0;
-                    
-                    // Add text with marker ID
-                    vis_marker.text = std::to_string(ids_filt[idx]);
+                const double axis_scale = marker_size_ * 0.6;
+                const size_t n = ids_filt.size();
+                vis_marker_array.markers.reserve(n * 5);  // cube + sphere + 3 axes per marker
+
+                for (size_t idx = 0; idx < n; ++idx) {
+                    int mid = ids_filt[idx];
+                    const auto& obs = marker_array.markers[idx];
+                    double r = ((mid * 37) % 255) / 255.0;
+                    double g = ((mid * 73) % 255) / 255.0;
+                    double b = ((mid * 113) % 255) / 255.0;
+
+                    // 1) 마커 평면 큐브
+                    visualization_msgs::msg::Marker cube;
+                    cube.header = marker_array.header;
+                    cube.ns = "aruco_cubes";
+                    cube.id = mid;
+                    cube.type = visualization_msgs::msg::Marker::CUBE;
+                    cube.action = visualization_msgs::msg::Marker::ADD;
+                    cube.pose = obs.pose;
+                    cube.scale.x = marker_size_;
+                    cube.scale.y = marker_size_;
+                    cube.scale.z = 0.01;
+                    cube.color.a = 0.6;
+                    cube.color.r = r;
+                    cube.color.g = g;
+                    cube.color.b = b;
+                    cube.lifetime.sec = 0;
+                    cube.lifetime.nanosec = 0;
+                    vis_marker_array.markers.push_back(cube);
+
+                    // 2) 마커 중심 3D 위치 구
+                    visualization_msgs::msg::Marker sphere;
+                    sphere.header = marker_array.header;
+                    sphere.ns = "aruco_centers";
+                    sphere.id = mid;
+                    sphere.type = visualization_msgs::msg::Marker::SPHERE;
+                    sphere.action = visualization_msgs::msg::Marker::ADD;
+                    sphere.pose.position = obs.pose.position;
+                    sphere.pose.orientation.w = 1.0;
+                    sphere.pose.orientation.x = sphere.pose.orientation.y = sphere.pose.orientation.z = 0.0;
+                    sphere.scale.x = sphere.scale.y = sphere.scale.z = marker_size_ * 0.15;
+                    sphere.color.a = 0.9;
+                    sphere.color.r = r;
+                    sphere.color.g = g;
+                    sphere.color.b = b;
+                    sphere.lifetime.sec = 0;
+                    sphere.lifetime.nanosec = 0;
+                    vis_marker_array.markers.push_back(sphere);
+
+                    // 3) ID 텍스트
+                    visualization_msgs::msg::Marker text;
+                    text.header = marker_array.header;
+                    text.ns = "aruco_labels";
+                    text.id = mid;
+                    text.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
+                    text.action = visualization_msgs::msg::Marker::ADD;
+                    text.pose.position = obs.pose.position;
+                    text.pose.position.z += marker_size_ * 0.6;
+                    text.pose.orientation.w = 1.0;
+                    text.pose.orientation.x = text.pose.orientation.y = text.pose.orientation.z = 0.0;
+                    text.scale.z = marker_size_ * 0.4;
+                    text.color.a = 1.0;
+                    text.color.r = 1.0;
+                    text.color.g = 1.0;
+                    text.color.b = 1.0;
+                    text.text = "ID:" + std::to_string(mid);
+                    text.lifetime.sec = 0;
+                    text.lifetime.nanosec = 0;
+                    vis_marker_array.markers.push_back(text);
+
+                    // 4) 좌표축: X(빨강), Y(초록), Z(파랑) 화살표
+                    geometry_msgs::msg::Point origin;
+                    origin.x = obs.pose.position.x;
+                    origin.y = obs.pose.position.y;
+                    origin.z = obs.pose.position.z;
+                    auto q = obs.pose.orientation;
+                    auto rot = [&q](double x, double y, double z) {
+                        geometry_msgs::msg::Point p;
+                        double qw = q.w, qx = q.x, qy = q.y, qz = q.z;
+                        p.x = (1 - 2*(qy*qy + qz*qz)) * x + 2*(qx*qy - qw*qz) * y + 2*(qx*qz + qw*qy) * z;
+                        p.y = 2*(qx*qy + qw*qz) * x + (1 - 2*(qx*qx + qz*qz)) * y + 2*(qy*qz - qw*qx) * z;
+                        p.z = 2*(qx*qz - qw*qy) * x + 2*(qy*qz + qw*qx) * y + (1 - 2*(qx*qx + qy*qy)) * z;
+                        return p;
+                    };
+                    auto arrow = [&](int axis_id, double ax, double ay, double az, float cr, float cg, float cb) {
+                        visualization_msgs::msg::Marker ar;
+                        ar.header = marker_array.header;
+                        ar.ns = "aruco_axes";
+                        ar.id = mid * 3 + axis_id;
+                        ar.type = visualization_msgs::msg::Marker::ARROW;
+                        ar.action = visualization_msgs::msg::Marker::ADD;
+                        geometry_msgs::msg::Point end;
+                        geometry_msgs::msg::Point pd = rot(ax, ay, az);
+                        end.x = origin.x + pd.x * axis_scale;
+                        end.y = origin.y + pd.y * axis_scale;
+                        end.z = origin.z + pd.z * axis_scale;
+                        ar.points.resize(2);
+                        ar.points[0] = origin;
+                        ar.points[1] = end;
+                        ar.scale.x = axis_scale * 0.08;
+                        ar.scale.y = axis_scale * 0.16;
+                        ar.color.a = 0.9;
+                        ar.color.r = cr;
+                        ar.color.g = cg;
+                        ar.color.b = cb;
+                        ar.lifetime.sec = 0;
+                        ar.lifetime.nanosec = 0;
+                        vis_marker_array.markers.push_back(ar);
+                    };
+                    arrow(0, 1, 0, 0, 1.0f, 0.0f, 0.0f);  // X
+                    arrow(1, 0, 1, 0, 0.0f, 1.0f, 0.0f);  // Y
+                    arrow(2, 0, 0, 1, 0.0f, 0.0f, 1.0f);  // Z
                 }
-                
+
                 visualization_markers_pub_->publish(vis_marker_array);
                 }
             } else {
@@ -297,6 +487,8 @@ private:
     // Member variables
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr image_sub_;
     rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr camera_info_sub_;
+    rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr depth_image_sub_;
+    rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr depth_camera_info_sub_;
     rclcpp::Publisher<aruco_slam_ailab::msg::MarkerArray>::SharedPtr aruco_poses_pub_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr visualization_markers_pub_;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr debug_image_pub_;
@@ -311,6 +503,11 @@ private:
 
     double marker_size_;
     std::set<int> target_marker_ids_;
+
+    std::mutex depth_mutex_;
+    cv::Mat latest_depth_image_;
+    bool depth_image_valid_ = false;
+    bool depth_camera_info_received_ = false;
 };
 
 int main(int argc, char** argv) {

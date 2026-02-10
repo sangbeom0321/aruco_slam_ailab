@@ -44,12 +44,12 @@
         </geometry>
       </collision>
 
-      <!-- ArUco marker on -X face -->
+      <!-- ArUco marker on -X face (50x50 cm) -->
       <visual name='marker_aruco_neg_x'>
         <pose>-0.251 0 0 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.003 0.30 0.30</size>
+            <size>0.003 0.50 0.50</size>
           </box>
         </geometry>
         <material>
@@ -61,12 +61,12 @@
         </material>
       </visual>
 
-      <!-- ArUco marker on -Z face -->
+      <!-- ArUco marker on -Z face (50x50 cm) -->
       <visual name='marker_aruco_neg_z'>
         <pose>0 0 -0.301 1.5708 0 -1.5708</pose>
         <geometry>
           <box>
-            <size>0.30 0.003 0.30</size>
+            <size>0.50 0.003 0.50</size>
           </box>
         </geometry>
         <material>

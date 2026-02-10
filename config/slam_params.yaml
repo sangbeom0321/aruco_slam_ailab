@@ -1,15 +1,15 @@
 /**:
   ros__parameters:
     # Topics
-    imu_topic: "/imu"
+    imu_topic: "/camera/imu"
     wheel_odom_topic: "/wheel_odom"
     aruco_poses_topic: "/aruco_poses"
 
     # Frames (TF: odom -> base_link -> camera)
-    # Path와 랜드마크는 SLAM 세계 좌표계인 odom_frame에 퍼블리시 (RViz Fixed Frame = odom 권장)
+    # Path와 랜드마크_odom은 odom_frame. /slam/landmarks 시각화는 camera_frame(아래) 사용 → /aruco_markers와 같은 프레임으로 겹쳐 보임
     base_link_frame: "base_link"
-    imu_frame: "imu_link"
-    camera_frame: "camera_link"
+    imu_frame: "camera_gyro_optical_frame"
+    camera_frame: "camera_color_optical_frame"  # ArUco 관측/랜드마크 시각화 프레임 (RGB와 동일해야 비교 시 정렬됨)
     odom_frame: "odom"
     map_frame: "map"   # 미사용; path/landmarks는 odom_frame 사용
 
@@ -20,40 +20,44 @@
     imu_gyr_bias_n: 0.00001       # rad/s
     imu_gravity: 9.81             # m/s^2
 
-    # Extrinsic calibrations (base_link to IMU)
-    # Translation [x, y, z] in meters
-    ext_trans_base_imu: [0.0, 0.0, 0.0]
-    # Rotation matrix (row-major): [r11, r12, r13, r21, r22, r23, r31, r32, r33]
+    # Extrinsic: TF는 base_link 기준 회전 있음, but 센서 데이터는 회전 없이 나옴 → translation만 사용
+    # base_link -> IMU (translation만; 데이터는 이미 base_link 축과 맞음)
+    ext_trans_base_imu: [0.395, 0.017, 0.044]
     ext_rot_base_imu: [1.0, 0.0, 0.0,
                        0.0, 1.0, 0.0,
                        0.0, 0.0, 1.0]
 
-    # Extrinsic calibrations (base_link to Camera)
-    # Camera position: x=0.4m forward, z=0.0225m up, no rotation
-    ext_trans_base_cam: [0.4, 0.0, 0.0225]
-    ext_rot_base_cam: [1.0, 0.0, 0.0,
-                       0.0, 1.0, 0.0,
-                       0.0, 0.0, 1.0]
+    # base_link -> camera_color_optical_frame (TF 전체 사용: 관측을 base로 변환할 때 회전 필요 → /slam/landmarks가 odom 축에 맞게 표시)
+    ext_trans_base_cam: [0.411, -0.011, 0.037]
+    ext_rot_base_cam: [0.0, 0.0, 1.0,
+                      -1.0, 0.0, 0.0,
+                       0.0, -1.0, 0.0]
 
-    # Wheel odometry parameters
+    # base_link -> camera_depth_optical_frame (RViz 랜드마크 시각화용: depth PCD와 겹치게)
+    ext_trans_base_depth_cam: [0.411, 0.011, 0.037]
+    ext_rot_base_depth_cam: [0.0, 0.0, 1.0,
+                            -1.0, 0.0, 0.0,
+                             0.0, -1.0, 0.0]
+    # Wheel/IMU between-factor noise (키프레임 간 포즈 차이; Vision+IMU 시 IMU between에도 사용)
+    # 값을 크게 하면 그래프가 IMU 델타를 덜 신뢰 → Vision(ArUco)이 드리프트 보정에 더 기여
     use_wheel_odom: false
-    wheel_odom_trans_noise: 0.1   # meters
-    wheel_odom_rot_noise: 0.1      # radians
+    wheel_odom_trans_noise: 0.25   # meters (0.1→0.25: Vision이 IMU 드리프트를 더 보정하도록)
+    wheel_odom_rot_noise: 0.25    # radians
 
-    # ArUco observation parameters
+    # ArUco observation parameters (Vision+IMU 시 카메라 제약을 강하게 해서 IMU 드리프트에 끌리지 않도록)
     aruco_observation_frame: "camera"  # "base_link" or "camera"
-    aruco_trans_noise: 0.05        # meters
-    aruco_rot_noise: 0.1           # radians
+    aruco_trans_noise: 0.02        # meters (작을수록 제약 강함)
+    aruco_rot_noise: 0.05          # radians (작을수록 제약 강함)
 
     # Keyframe policy: 아래 조건 중 하나라도 만족하면 키프레임 추가 (OR)
     # - 첫 키프레임: 항상 첫 프레임은 키프레임
     # - 시간 간격: keyframe_time_interval 이상 경과
     # - 움직임: 거리 ≥ keyframe_distance_threshold 또는 회전 ≥ keyframe_angle_threshold
-    # - 마커 등장: 이전 키프레임에 없던 ArUco 마커 ID가 현재 프레임에 있음
-    # - 마커 퇴장: 이전 키프레임에 있던 마커 ID가 현재 프레임에 없음
-    keyframe_time_interval: 0.5      # seconds
-    keyframe_distance_threshold: 0.1 # meters (예: 10cm 이상 이동)
-    keyframe_angle_threshold: 0.26   # radians (예: 약 15도 이상 회전)
+    # - 마커 등장/퇴장: 마커 변경 시에도 최소 keyframe_time_interval 경과 후에만 추가 (과다 키프레임 방지)
+    # 키프레임이 더 자주 추가될수록 Vision 보정 빈도 증가 (드리프트 억제에 유리)
+    keyframe_time_interval: 0.5      # seconds (1.0→0.5: 더 자주 Vision 보정)
+    keyframe_distance_threshold: 0.15 # meters (20cm→15cm)
+    keyframe_angle_threshold: 0.25   # radians (약 14도)
 
     # ISAM2 parameters
     isam_relinearize_threshold: 0.1

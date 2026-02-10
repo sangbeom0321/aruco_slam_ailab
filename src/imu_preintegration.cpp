@@ -1,4 +1,5 @@
 #include "aruco_slam_ailab/utility.hpp"
+#include "aruco_slam_ailab/msg/optimized_keyframe_state.hpp"
 
 #include <gtsam/navigation/ImuFactor.h>
 #include <gtsam/navigation/ImuBias.h>
@@ -19,6 +20,7 @@ public:
     std::mutex mtx_;
 
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr subImu_;
+    rclcpp::Subscription<aruco_slam_ailab::msg::OptimizedKeyframeState>::SharedPtr subOptimizedKeyframeState_;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubImuOdometry_;
 
     bool systemInitialized_ = false;
@@ -63,6 +65,10 @@ public:
         subImu_ = create_subscription<sensor_msgs::msg::Imu>(
             imuTopic, 2000,
             std::bind(&IMUPreintegration::imuHandler, this, std::placeholders::_1));
+
+        subOptimizedKeyframeState_ = create_subscription<aruco_slam_ailab::msg::OptimizedKeyframeState>(
+            "/optimized_keyframe_state", 10,
+            std::bind(&IMUPreintegration::optimizedKeyframeStateCallback, this, std::placeholders::_1));
 
         pubImuOdometry_ = create_publisher<nav_msgs::msg::Odometry>(
             "/odometry/imu_incremental", 2000);
@@ -242,6 +248,9 @@ public:
         }
 
         double imuTime = stamp2Sec(imu_base.header.stamp);
+        if (lastImuTime_ >= 0 && imuTime <= lastImuTime_) {
+            return;  // keyframe 리셋 이후 오래된 stamp 무시
+        }
         double dt = (lastImuTime_ < 0) ? (1.0 / 200.0) : (imuTime - lastImuTime_);
         lastImuTime_ = imuTime;
 
@@ -385,6 +394,83 @@ public:
         std::lock_guard<std::mutex> lock(mtx_);
         prevState_ = state;
         prevBias_ = bias;
+    }
+
+    // Graph optimization 결과 수신: 이 포즈/속도/바이어스로 재초기화하고,
+    // 그 시점부터 현재까지 쌓인 IMU 데이터를 "재적분(Re-propagation)" 해야 튐/발산 방지
+    void optimizedKeyframeStateCallback(const aruco_slam_ailab::msg::OptimizedKeyframeState::SharedPtr msg) {
+        if (msg->bias.size() != 6) {
+            RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
+                "[IMU] Ignored optimized_keyframe_state: bias size %zu (expected 6)", msg->bias.size());
+            return;
+        }
+
+        std::lock_guard<std::mutex> lock(mtx_);
+
+        double optTime = stamp2Sec(msg->header.stamp);
+
+        // 1. 최적화된 상태(Pose, Velocity, Bias) 파싱
+        gtsam::Pose3 basePose = poseMsgToGtsam(msg->pose);
+        gtsam::Pose3 imuPose = basePose.compose(baseToImu_);
+        gtsam::Vector3 vel(msg->velocity.x, msg->velocity.y, msg->velocity.z);
+        gtsam::imuBias::ConstantBias newBias(
+            (gtsam::Vector(6) << msg->bias[0], msg->bias[1], msg->bias[2],
+                                 msg->bias[3], msg->bias[4], msg->bias[5]).finished());
+
+        // 2. 큐 정리: 최적화 시점(optTime)보다 오래된 데이터는 삭제
+        //    재적분을 위해 optTime 직후의 데이터부터는 남겨둠
+        while (!imuQueue_.empty()) {
+            if (stamp2Sec(imuQueue_.front().header.stamp) < optTime) {
+                imuQueue_.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        // 3. 상태 리셋: 기준 상태(prevState_)를 최적화된 값으로 덮어씀
+        prevState_ = gtsam::NavState(imuPose, vel);
+        prevBias_ = newBias;
+
+        // 4. 적분기 리셋: 새로운 바이어스 적용
+        imuIntegratorImu_->resetIntegrationAndSetBias(prevBias_);
+
+        // 5. [핵심] 재전파 (Re-propagation): t_opt ~ t_now 큐 데이터를 새 바이어스/시작위치로 재적분
+        double dt_accum = 0.0;
+        double last_t = optTime;
+
+        if (!imuQueue_.empty()) {
+            for (const auto& imu : imuQueue_) {
+                double t = stamp2Sec(imu.header.stamp);
+                double dt = t - last_t;
+
+                if (dt > 0) {
+                    imuIntegratorImu_->integrateMeasurement(
+                        gtsam::Vector3(imu.linear_acceleration.x, imu.linear_acceleration.y, imu.linear_acceleration.z),
+                        gtsam::Vector3(imu.angular_velocity.x, imu.angular_velocity.y, imu.angular_velocity.z),
+                        dt);
+                    last_t = t;
+                    dt_accum += dt;
+                }
+            }
+        }
+
+        // 6. 재적분 결과로 prevState_를 "현재" 시점으로 갱신 (다음 imuHandler가 작은 dt로 적분하도록)
+        if (dt_accum > 0) {
+            prevState_ = imuIntegratorImu_->predict(prevState_, prevBias_);
+            imuIntegratorImu_->resetIntegrationAndSetBias(prevBias_);
+        }
+
+        // 7. 시간 동기화: lastImuTime_을 큐의 마지막 시간(현재)으로 설정 → 다음 imuHandler에서 dt 꼬임 방지
+        if (dt_accum > 0) {
+            lastImuTime_ = last_t;
+        } else {
+            lastImuTime_ = optTime;
+        }
+
+        if (enableTopicDebugLog) {
+            RCLCPP_INFO(get_logger(), "[IMU] Corrected & Repropagated: time gap %.4fs updated, queue=%zu",
+                dt_accum, imuQueue_.size());
+        }
     }
 };
 
