@@ -60,6 +60,7 @@ public:
     // Topics
     std::string imuTopic;
     std::string wheelOdomTopic;
+    std::string odomTopic;  // /odom for vision-only OdomBetweenFactor
     std::string arucoPosesTopic;
     
     // Frames
@@ -88,12 +89,15 @@ public:
     double wheelOdomTransNoise;
     double wheelOdomRotNoise;
     bool useWheelOdom;
+
+    // Odom BetweenFactor (vision-only): /odom topic noise
+    double odomBetweenTransNoise;
+    double odomBetweenRotNoise;
     
     // IMU usage flag
     bool useImu;
     
     // ArUco observation parameters
-    std::string arucoObservationFrame;  // "base_link" or "camera"
     double arucoTransNoise;
     double arucoRotNoise;
     
@@ -115,10 +119,12 @@ public:
         // Topics
         declare_parameter("imu_topic", "/imu");
         declare_parameter("wheel_odom_topic", "/wheel_odom");
+        declare_parameter("odom_topic", "/w_odom");
         declare_parameter("aruco_poses_topic", "/aruco_poses");
         
         get_parameter("imu_topic", imuTopic);
         get_parameter("wheel_odom_topic", wheelOdomTopic);
+        get_parameter("odom_topic", odomTopic);
         get_parameter("aruco_poses_topic", arucoPosesTopic);
         
         // Frames
@@ -188,20 +194,24 @@ public:
         get_parameter("use_wheel_odom", useWheelOdom);
         get_parameter("wheel_odom_trans_noise", wheelOdomTransNoise);
         get_parameter("wheel_odom_rot_noise", wheelOdomRotNoise);
+
+        // Odom BetweenFactor (vision-only)
+        declare_parameter("odom_between_trans_noise", 0.15);
+        declare_parameter("odom_between_rot_noise", 0.15);
+        get_parameter("odom_between_trans_noise", odomBetweenTransNoise);
+        get_parameter("odom_between_rot_noise", odomBetweenRotNoise);
         
         // ArUco observation parameters
-        declare_parameter("aruco_observation_frame", "base_link");
         declare_parameter("aruco_trans_noise", 0.05);
         declare_parameter("aruco_rot_noise", 0.1);
         
-        get_parameter("aruco_observation_frame", arucoObservationFrame);
         get_parameter("aruco_trans_noise", arucoTransNoise);
         get_parameter("aruco_rot_noise", arucoRotNoise);
         
         // Keyframe policy
-        declare_parameter("keyframe_time_interval", 0.1);
+        declare_parameter("keyframe_time_interval", 2.0);
         declare_parameter("keyframe_distance_threshold", 0.5);
-        declare_parameter("keyframe_angle_threshold", 0.2);
+        declare_parameter("keyframe_angle_threshold", 0.0524);  // 3 deg
 
         get_parameter("keyframe_time_interval", keyframeTimeInterval);
         get_parameter("keyframe_distance_threshold", keyframeDistanceThreshold);

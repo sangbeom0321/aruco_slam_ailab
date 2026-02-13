@@ -28,6 +28,7 @@ public:
         declare_parameter("depth_camera_info_topic", "/camera/depth/depth/camera_info");
         declare_parameter("marker_size", 0.30);
         declare_parameter("aruco_dict_type", "DICT_4X4_50");
+        declare_parameter("debug", false);
 
         std::string camera_topic = get_parameter("camera_topic").as_string();
         std::string camera_info_topic = get_parameter("camera_info_topic").as_string();
@@ -35,6 +36,7 @@ public:
         std::string depth_camera_info_topic = get_parameter("depth_camera_info_topic").as_string();
         marker_size_ = get_parameter("marker_size").as_double();
         std::string aruco_dict_type = get_parameter("aruco_dict_type").as_string();
+        debug_enabled_ = get_parameter("debug").as_bool();
 
         // Initialize ArUco dictionary
         initArucoDictionary(aruco_dict_type);
@@ -65,17 +67,19 @@ public:
         // Publish custom MarkerArray directly for SLAM backend
         aruco_poses_pub_ = create_publisher<aruco_slam_ailab::msg::MarkerArray>(
             "/aruco_poses", 10);
-        // Publish visualization markers for RViz
+        // Publish visualization markers for RViz (MarkerArray display accepts any topic name, no "_array" suffix required)
         visualization_markers_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>(
             "/aruco_markers", 10);
         debug_image_pub_ = create_publisher<sensor_msgs::msg::Image>(
             "/aruco_debug_image", 10);
 
-        RCLCPP_INFO(get_logger(), "ArUco Detector Node started");
-        RCLCPP_INFO(get_logger(), "  Camera topic: %s", camera_topic.c_str());
-        RCLCPP_INFO(get_logger(), "  Depth topic: %s", depth_topic.c_str());
-        RCLCPP_INFO(get_logger(), "  Marker size: %.2f m", marker_size_);
-        RCLCPP_INFO(get_logger(), "  ArUco dictionary: %s", aruco_dict_type.c_str());
+        if (debug_enabled_) {
+            RCLCPP_INFO(get_logger(), "ArUco Detector Node started");
+            RCLCPP_INFO(get_logger(), "  Camera topic: %s", camera_topic.c_str());
+            RCLCPP_INFO(get_logger(), "  Depth topic: %s", depth_topic.c_str());
+            RCLCPP_INFO(get_logger(), "  Marker size: %.2f m", marker_size_);
+            RCLCPP_INFO(get_logger(), "  ArUco dictionary: %s", aruco_dict_type.c_str());
+        }
     }
 
 private:
@@ -99,7 +103,7 @@ private:
         if (it != dict_map.end()) {
             aruco_dict_ = cv::aruco::getPredefinedDictionary(it->second);
         } else {
-            RCLCPP_WARN(get_logger(), "Unknown dictionary type: %s, using DICT_4X4_50", dict_type.c_str());
+            if (debug_enabled_) RCLCPP_WARN(get_logger(), "Unknown dictionary type: %s, using DICT_4X4_50", dict_type.c_str());
             aruco_dict_ = cv::aruco::getPredefinedDictionary(cv::aruco::DICT_4X4_50);
         }
 
@@ -124,7 +128,7 @@ private:
             camera_frame_ = msg->header.frame_id;
             camera_matrix_initialized_ = true;
 
-            RCLCPP_INFO(get_logger(), "Camera intrinsics received. Frame: %s", camera_frame_.c_str());
+            if (debug_enabled_) RCLCPP_INFO(get_logger(), "Camera intrinsics received. Frame: %s", camera_frame_.c_str());
         }
     }
 
@@ -136,7 +140,7 @@ private:
             } else if (msg->encoding == sensor_msgs::image_encodings::TYPE_32FC1) {
                 latest_depth_image_ = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::TYPE_32FC1)->image;
             } else {
-                RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
+                if (debug_enabled_) RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
                     "Depth image encoding not supported: %s (use 16UC1 or 32FC1)", msg->encoding.c_str());
                 return;
             }
@@ -150,7 +154,7 @@ private:
         (void)msg;
         if (!depth_camera_info_received_) {
             depth_camera_info_received_ = true;
-            RCLCPP_INFO(get_logger(), "Depth camera info received");
+            if (debug_enabled_) RCLCPP_INFO(get_logger(), "Depth camera info received");
         }
     }
 
@@ -181,7 +185,7 @@ private:
 
     void imageCallback(const sensor_msgs::msg::Image::SharedPtr msg) {
         if (!camera_matrix_initialized_) {
-            RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000, "Waiting for camera info...");
+            if (debug_enabled_) RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000, "Waiting for camera info...");
             return;
         }
 
@@ -224,7 +228,7 @@ private:
                 }
 
                 if (ids_filt.empty()) {
-                    // 0~9에 해당하는 마커 없음
+                    // 마커 없음: 시각화만 스킵 (DELETE 안 함 → 기존 마커 누적 유지)
                 } else {
                 // Draw detected markers (0~9만)
                 cv::aruco::drawDetectedMarkers(debug_image, corners_filt, ids_filt);
@@ -271,11 +275,11 @@ private:
                         if (depth_sensor > 0.0) {
                             double err_m = depth_aruco - depth_sensor;
                             double err_pct = (depth_sensor > 1e-6) ? (100.0 * err_m / depth_sensor) : 0.0;
-                            RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000,
-                                "[Depth accuracy] id=%d | ArUco(RGB)=%.3f m | sensor=%.3f m | err=%.3f m (%.1f%%) | reproj=%.2f px",
-                                marker_id, depth_aruco, depth_sensor, err_m, err_pct, reproj_error_px);
+                            // RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000,
+                            //     "[Depth accuracy] id=%d | ArUco(RGB)=%.3f m | sensor=%.3f m | err=%.3f m (%.1f%%) | reproj=%.2f px",
+                            //     marker_id, depth_aruco, depth_sensor, err_m, err_pct, reproj_error_px);
                         } else {
-                            RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000,
+                            if (debug_enabled_) RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000,
                                 "[Depth] id=%d | ArUco(RGB)=%.3f m | sensor=invalid | reproj_err=%.2f px",
                                 marker_id, depth_aruco, reproj_error_px);
                         }
@@ -310,11 +314,16 @@ private:
                 // Publish custom MarkerArray directly for SLAM backend
                 aruco_poses_pub_->publish(marker_array);
                 
-                // Publish 3D visualization for RViz: 큐브(마커 평면) + 구(위치) + 축 + ID 텍스트
+                // Publish 3D visualization for RViz: 누적 (DELETE 안 함, 매 프레임 고유 ID로 ADD만)
+                // stamp를 now()로 하여 map 기준 TF lookup 시 extrapolation into future 방지
+                std_msgs::msg::Header vis_header;
+                vis_header.stamp = now();
+                vis_header.frame_id = camera_frame_;
+
                 visualization_msgs::msg::MarkerArray vis_marker_array;
                 const double axis_scale = marker_size_ * 0.6;
                 const size_t n = ids_filt.size();
-                vis_marker_array.markers.reserve(n * 5);  // cube + sphere + 3 axes per marker
+                vis_marker_array.markers.reserve(n * 5);
 
                 for (size_t idx = 0; idx < n; ++idx) {
                     int mid = ids_filt[idx];
@@ -323,11 +332,11 @@ private:
                     double g = ((mid * 73) % 255) / 255.0;
                     double b = ((mid * 113) % 255) / 255.0;
 
-                    // 1) 마커 평면 큐브
+                    // 1) 마커 평면 큐브 (고유 ID로 누적)
                     visualization_msgs::msg::Marker cube;
-                    cube.header = marker_array.header;
+                    cube.header = vis_header;
                     cube.ns = "aruco_cubes";
-                    cube.id = mid;
+                    cube.id = vis_marker_id_counter_++;
                     cube.type = visualization_msgs::msg::Marker::CUBE;
                     cube.action = visualization_msgs::msg::Marker::ADD;
                     cube.pose = obs.pose;
@@ -344,9 +353,9 @@ private:
 
                     // 2) 마커 중심 3D 위치 구
                     visualization_msgs::msg::Marker sphere;
-                    sphere.header = marker_array.header;
+                    sphere.header = vis_header;
                     sphere.ns = "aruco_centers";
-                    sphere.id = mid;
+                    sphere.id = vis_marker_id_counter_++;
                     sphere.type = visualization_msgs::msg::Marker::SPHERE;
                     sphere.action = visualization_msgs::msg::Marker::ADD;
                     sphere.pose.position = obs.pose.position;
@@ -363,9 +372,9 @@ private:
 
                     // 3) ID 텍스트
                     visualization_msgs::msg::Marker text;
-                    text.header = marker_array.header;
+                    text.header = vis_header;
                     text.ns = "aruco_labels";
-                    text.id = mid;
+                    text.id = vis_marker_id_counter_++;
                     text.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
                     text.action = visualization_msgs::msg::Marker::ADD;
                     text.pose.position = obs.pose.position;
@@ -397,10 +406,11 @@ private:
                         return p;
                     };
                     auto arrow = [&](int axis_id, double ax, double ay, double az, float cr, float cg, float cb) {
+                        (void)axis_id;
                         visualization_msgs::msg::Marker ar;
-                        ar.header = marker_array.header;
+                        ar.header = vis_header;
                         ar.ns = "aruco_axes";
-                        ar.id = mid * 3 + axis_id;
+                        ar.id = vis_marker_id_counter_++;
                         ar.type = visualization_msgs::msg::Marker::ARROW;
                         ar.action = visualization_msgs::msg::Marker::ADD;
                         geometry_msgs::msg::Point end;
@@ -429,7 +439,8 @@ private:
                 visualization_markers_pub_->publish(vis_marker_array);
                 }
             } else {
-                RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+                // 마커 전혀 없음: 시각화만 스킵 (누적 유지)
+                if (debug_enabled_) RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
                     "No ArUco markers detected in image");
             }
 
@@ -499,10 +510,12 @@ private:
     cv::Mat camera_matrix_;
     cv::Mat dist_coeffs_;
     std::string camera_frame_;
+    bool debug_enabled_ = false;
     bool camera_matrix_initialized_ = false;
 
     double marker_size_;
     std::set<int> target_marker_ids_;
+    int vis_marker_id_counter_ = 0;  // 3D 시각화 마커 누적용 고유 ID
 
     std::mutex depth_mutex_;
     cv::Mat latest_depth_image_;

@@ -147,6 +147,18 @@ rosidl_get_typesupport_target(cpp_typesupport_target2
   ${PROJECT_NAME} "rosidl_typesupport_cpp")
 target_link_libraries(graph_optimizer "${cpp_typesupport_target2}")
 
+# wheel_odom_node executable
+add_executable(wheel_odom_node src/wheel_odom_node.cpp)
+ament_target_dependencies(wheel_odom_node
+  rclcpp
+  sensor_msgs
+  nav_msgs
+  geometry_msgs
+  tf2
+  tf2_ros
+  tf2_geometry_msgs
+)
+
 # aruco_detector_node executable
 add_executable(aruco_detector_node src/aruco_detector_node.cpp)
 ament_target_dependencies(aruco_detector_node
@@ -154,6 +166,7 @@ ament_target_dependencies(aruco_detector_node
   sensor_msgs
   visualization_msgs
   cv_bridge
+  geometry_msgs
 )
 rosidl_get_typesupport_target(cpp_typesupport_target3
   ${PROJECT_NAME} "rosidl_typesupport_cpp")
@@ -167,6 +180,7 @@ install(TARGETS
   imu_preintegration
   graph_optimizer
   aruco_detector_node
+  wheel_odom_node
   DESTINATION lib/${PROJECT_NAME}
 )
 
