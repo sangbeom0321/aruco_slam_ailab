@@ -14,7 +14,6 @@
 #include <memory>
 #include <vector>
 #include <map>
-#include <set>
 #include <cmath>
 #include <mutex>
 
@@ -40,11 +39,6 @@ public:
 
         // Initialize ArUco dictionary
         initArucoDictionary(aruco_dict_type);
-
-        // Target marker IDs: 0 to 9
-        for (int i = 0; i < 10; ++i) {
-            target_marker_ids_.insert(i);
-        }
 
         // Subscribers
         image_sub_ = create_subscription<sensor_msgs::msg::Image>(
@@ -215,33 +209,25 @@ private:
                     camera_matrix_, dist_coeffs_,
                     rvecs, tvecs);
 
-                // ID 0~9만 사용 (이외는 탐색 결과에서 제외)
-                std::vector<int> ids_filt;
-                std::vector<std::vector<cv::Point2f>> corners_filt;
-                std::vector<cv::Vec3d> rvecs_filt, tvecs_filt;
-                for (size_t idx = 0; idx < ids.size(); ++idx) {
-                    if (target_marker_ids_.count(ids[idx]) == 0) continue;
-                    ids_filt.push_back(ids[idx]);
-                    corners_filt.push_back(corners[idx]);
-                    rvecs_filt.push_back(rvecs[idx]);
-                    tvecs_filt.push_back(tvecs[idx]);
-                }
-
-                if (ids_filt.empty()) {
-                    // 마커 없음: 시각화만 스킵 (DELETE 안 함 → 기존 마커 누적 유지)
+                if (ids.empty()) {
+                    // 마커 없음: 빈 MarkerArray 발행 (graph_optimizer가 Dead Reckoning 초기화 가능)
+                    aruco_slam_ailab::msg::MarkerArray empty_array;
+                    empty_array.header.stamp = msg->header.stamp;
+                    empty_array.header.frame_id = camera_frame_;
+                    aruco_poses_pub_->publish(empty_array);
                 } else {
-                // Draw detected markers (0~9만)
-                cv::aruco::drawDetectedMarkers(debug_image, corners_filt, ids_filt);
+                // Draw detected markers
+                cv::aruco::drawDetectedMarkers(debug_image, corners, ids);
 
                 // Create custom MarkerArray for SLAM backend
                 aruco_slam_ailab::msg::MarkerArray marker_array;
                 marker_array.header.stamp = msg->header.stamp;
                 marker_array.header.frame_id = camera_frame_;
 
-                for (size_t idx = 0; idx < ids_filt.size(); ++idx) {
-                    cv::Vec3d rvec = rvecs_filt[idx];
-                    cv::Vec3d tvec = tvecs_filt[idx];
-                    int marker_id = ids_filt[idx];
+                for (size_t idx = 0; idx < ids.size(); ++idx) {
+                    cv::Vec3d rvec = rvecs[idx];
+                    cv::Vec3d tvec = tvecs[idx];
+                    int marker_id = ids[idx];
 
                     // Depth 추정 정확도 로그: 재투영 오차 + RGB(ArUco) 추정 vs 센서 깊이
                     {
@@ -256,8 +242,8 @@ private:
                         cv::projectPoints(obj_pts, rvec, tvec, camera_matrix_, dist_coeffs_, proj_pts);
                         double err_sum = 0;
                         for (size_t k = 0; k < 4; ++k) {
-                            double dx = proj_pts[k].x - corners_filt[idx][k].x;
-                            double dy = proj_pts[k].y - corners_filt[idx][k].y;
+                            double dx = proj_pts[k].x - corners[idx][k].x;
+                            double dy = proj_pts[k].y - corners[idx][k].y;
                             err_sum += dx*dx + dy*dy;
                         }
                         double reproj_error_px = std::sqrt(err_sum / 4.0);
@@ -270,7 +256,7 @@ private:
                                 depth_for_sample = latest_depth_image_.clone();
                         }
                         double depth_sensor = sampleDepthAtMarkerCenter(
-                            depth_for_sample, cv_image.cols, cv_image.rows, corners_filt[idx]);
+                            depth_for_sample, cv_image.cols, cv_image.rows, corners[idx]);
 
                         if (depth_sensor > 0.0) {
                             double err_m = depth_aruco - depth_sensor;
@@ -322,11 +308,11 @@ private:
 
                 visualization_msgs::msg::MarkerArray vis_marker_array;
                 const double axis_scale = marker_size_ * 0.6;
-                const size_t n = ids_filt.size();
+                const size_t n = ids.size();
                 vis_marker_array.markers.reserve(n * 5);
 
                 for (size_t idx = 0; idx < n; ++idx) {
-                    int mid = ids_filt[idx];
+                    int mid = ids[idx];
                     const auto& obs = marker_array.markers[idx];
                     double r = ((mid * 37) % 255) / 255.0;
                     double g = ((mid * 73) % 255) / 255.0;
@@ -439,7 +425,11 @@ private:
                 visualization_markers_pub_->publish(vis_marker_array);
                 }
             } else {
-                // 마커 전혀 없음: 시각화만 스킵 (누적 유지)
+                // 마커 전혀 없음: 빈 MarkerArray 발행 (graph_optimizer Dead Reckoning용)
+                aruco_slam_ailab::msg::MarkerArray empty_array;
+                empty_array.header.stamp = msg->header.stamp;
+                empty_array.header.frame_id = camera_frame_;
+                aruco_poses_pub_->publish(empty_array);
                 if (debug_enabled_) RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
                     "No ArUco markers detected in image");
             }
@@ -514,7 +504,6 @@ private:
     bool camera_matrix_initialized_ = false;
 
     double marker_size_;
-    std::set<int> target_marker_ids_;
     int vis_marker_id_counter_ = 0;  // 3D 시각화 마커 누적용 고유 ID
 
     std::mutex depth_mutex_;

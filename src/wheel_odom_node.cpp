@@ -39,6 +39,7 @@ public:
     declare_parameter("wheel_radius", 0.165);
     declare_parameter("track_width", 0.605);
     declare_parameter("base_frame", "base_link");
+    declare_parameter("base_footprint_frame", "base_footprint");  // odom child (URDF: odom->base_footprint->base_link)
     declare_parameter("odom_frame", "odom");
     declare_parameter("publish_tf", false);
     declare_parameter("wheel_odom_topic", "wheel_odom");
@@ -49,6 +50,7 @@ public:
     wheel_radius_ = get_parameter("wheel_radius").as_double();
     track_width_ = get_parameter("track_width").as_double();
     base_frame_ = get_parameter("base_frame").as_string();
+    base_footprint_frame_ = get_parameter("base_footprint_frame").as_string();
     odom_frame_ = get_parameter("odom_frame").as_string();
     publish_tf_ = get_parameter("publish_tf").as_bool();
     buffer_duration_ = get_parameter("buffer_duration").as_double();
@@ -220,7 +222,7 @@ private:
     nav_msgs::msg::Odometry odom;
     odom.header.stamp = now;
     odom.header.frame_id = odom_frame_;
-    odom.child_frame_id = base_frame_;
+    odom.child_frame_id = base_footprint_frame_;  // URDF: odom->base_footprint->base_link (TF 트리 연결)
 
     odom.pose.pose.position.x = current_pose_x_;
     odom.pose.pose.position.y = current_pose_y_;
@@ -243,7 +245,7 @@ private:
       geometry_msgs::msg::TransformStamped t;
       t.header.stamp = now;
       t.header.frame_id = odom_frame_;
-      t.child_frame_id = base_frame_;
+      t.child_frame_id = base_footprint_frame_;  // base_footprint 고립 방지
       t.transform.translation.x = current_pose_x_;
       t.transform.translation.y = current_pose_y_;
       t.transform.translation.z = 0.0;
@@ -256,6 +258,7 @@ private:
   double wheel_radius_;
   double track_width_;
   std::string base_frame_;
+  std::string base_footprint_frame_;
   std::string odom_frame_;
   bool publish_tf_;
   double buffer_duration_;

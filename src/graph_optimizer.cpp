@@ -204,7 +204,9 @@ public:
     }
 
     void initializeSystem(const aruco_slam_ailab::msg::MarkerArray& markers, const nav_msgs::msg::Odometry& odom) {
-        if (markers.markers.empty()) return;
+        // [핵심] 마커가 없어도 초기화 진행! (점프 현상 방지)
+        // 로봇이 움직이는 동안 SLAM 좌표계도 Dead Reckoning으로 이동하고,
+        // 나중에 마커 발견 시 연속적으로 이어짐 (0,0,0 강제 리셋 없음)
 
         // 시스템 원점을 (0,0,0)으로 고정
         currentEstimate_ = gtsam::Pose3();
@@ -232,7 +234,7 @@ public:
         // 초기화 직후에도 보정 신호 전송 (0점에서 시작하라고 Wheel Odom에 알림)
         publishCorrection(currentEstimate_, odom.header.stamp);
 
-        RCLCPP_INFO(get_logger(), "System Initialized at Frame 0");
+        RCLCPP_INFO(get_logger(), "System Initialized at Frame 0 (Markers: %zu)", markers.markers.size());
     }
 
     void processKeyframe(const aruco_slam_ailab::msg::MarkerArray& markers,
