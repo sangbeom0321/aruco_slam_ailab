@@ -1,8 +1,8 @@
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
-#include "aruco_slam_ailab/msg/marker_array.hpp"
-#include "aruco_slam_ailab/msg/marker_observation.hpp"
+#include "aruco_sam_ailab/msg/marker_array.hpp"
+#include "aruco_sam_ailab/msg/marker_observation.hpp"
 #include <visualization_msgs/msg/marker_array.hpp>
 #include <visualization_msgs/msg/marker.hpp>
 #include <geometry_msgs/msg/point.hpp>
@@ -16,6 +16,7 @@
 #include <map>
 #include <cmath>
 #include <mutex>
+#include <algorithm>
 
 class ArucoDetectorNode : public rclcpp::Node {
 public:
@@ -28,6 +29,9 @@ public:
         declare_parameter("marker_size", 0.30);
         declare_parameter("aruco_dict_type", "DICT_4X4_50");
         declare_parameter("debug", false);
+        declare_parameter("use_depth_correction", true);
+        declare_parameter("depth_max_range", 5.0);
+        declare_parameter("depth_sample_radius", 3);
 
         std::string camera_topic = get_parameter("camera_topic").as_string();
         std::string camera_info_topic = get_parameter("camera_info_topic").as_string();
@@ -36,6 +40,9 @@ public:
         marker_size_ = get_parameter("marker_size").as_double();
         std::string aruco_dict_type = get_parameter("aruco_dict_type").as_string();
         debug_enabled_ = get_parameter("debug").as_bool();
+        use_depth_correction_ = get_parameter("use_depth_correction").as_bool();
+        depth_max_range_ = get_parameter("depth_max_range").as_double();
+        depth_sample_radius_ = get_parameter("depth_sample_radius").as_int();
 
         // Initialize ArUco dictionary
         initArucoDictionary(aruco_dict_type);
@@ -59,7 +66,7 @@ public:
 
         // Publishers
         // Publish custom MarkerArray directly for SLAM backend
-        aruco_poses_pub_ = create_publisher<aruco_slam_ailab::msg::MarkerArray>(
+        aruco_poses_pub_ = create_publisher<aruco_sam_ailab::msg::MarkerArray>(
             "/aruco_poses", 10);
         // Publish visualization markers for RViz (MarkerArray display accepts any topic name, no "_array" suffix required)
         visualization_markers_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>(
@@ -152,29 +159,49 @@ private:
         }
     }
 
-    // RGB 이미지 좌표 (cx, cy)를 depth 이미지에서 샘플링. 깊이 해상도가 다를 수 있음.
+    // 마커 영역 내 여러 점 샘플링 후 median 깊이 반환 (가장자리 노이즈 완화)
     // 반환: 미터 단위 깊이. 유효하지 않으면 -1.0
-    double sampleDepthAtMarkerCenter(const cv::Mat& depth, int rgb_cols, int rgb_rows,
-                                      const std::vector<cv::Point2f>& corners) {
+    double sampleDepthInMarkerRegion(const cv::Mat& depth, int rgb_cols, int rgb_rows,
+                                     const std::vector<cv::Point2f>& corners) {
         if (depth.empty() || rgb_cols <= 0 || rgb_rows <= 0) return -1.0;
         float cx = 0, cy = 0;
         for (const auto& p : corners) { cx += p.x; cy += p.y; }
-        cx /= 4.0f; cy /= 4.0f;
-        int du = static_cast<int>(cx * depth.cols / rgb_cols);
-        int dv = static_cast<int>(cy * depth.rows / rgb_rows);
-        if (du < 0 || du >= depth.cols || dv < 0 || dv >= depth.rows) return -1.0;
+        cx /= 4.0f;
+        cy /= 4.0f;
 
-        double z_m = -1.0;
-        if (depth.type() == CV_16UC1) {
-            uint16_t v = depth.at<uint16_t>(dv, du);
-            if (v == 0) return -1.0;
-            z_m = v * 0.001;  // mm -> m
-        } else if (depth.type() == CV_32FC1) {
-            float v = depth.at<float>(dv, du);
-            if (std::isnan(v) || v <= 0.0f) return -1.0;
-            z_m = static_cast<double>(v);
+        std::vector<double> valid_depths;
+        const int r = std::max(0, depth_sample_radius_);
+        for (int du_off = -r; du_off <= r; du_off++) {
+            for (int dv_off = -r; dv_off <= r; dv_off++) {
+                float u = cx + du_off, v = cy + dv_off;
+                int du = static_cast<int>(u * depth.cols / rgb_cols);
+                int dv = static_cast<int>(v * depth.rows / rgb_rows);
+                if (du < 0 || du >= depth.cols || dv < 0 || dv >= depth.rows) continue;
+                double z_m = -1.0;
+                if (depth.type() == CV_16UC1) {
+                    uint16_t val = depth.at<uint16_t>(dv, du);
+                    if (val == 0) continue;
+                    z_m = val * 0.001;
+                } else if (depth.type() == CV_32FC1) {
+                    float val = depth.at<float>(dv, du);
+                    if (std::isnan(val) || val <= 0.0f) continue;
+                    z_m = static_cast<double>(val);
+                }
+                if (z_m > 0.01 && z_m < depth_max_range_) valid_depths.push_back(z_m);
+            }
         }
-        return z_m;
+        if (valid_depths.empty()) return -1.0;
+        std::sort(valid_depths.begin(), valid_depths.end());
+        return valid_depths[valid_depths.size() / 2];  // median
+    }
+
+    // 픽셀 (u,v) + 깊이 d → 카메라 좌표계 3D 점 (미터)
+    cv::Point3d backProjectToCamera(double u, double v, double d) const {
+        double fx = camera_matrix_.at<double>(0, 0);
+        double fy = camera_matrix_.at<double>(1, 1);
+        double cx = camera_matrix_.at<double>(0, 2);
+        double cy = camera_matrix_.at<double>(1, 2);
+        return cv::Point3d((u - cx) * d / fx, (v - cy) * d / fy, d);
     }
 
     void imageCallback(const sensor_msgs::msg::Image::SharedPtr msg) {
@@ -211,7 +238,7 @@ private:
 
                 if (ids.empty()) {
                     // 마커 없음: 빈 MarkerArray 발행 (graph_optimizer가 Dead Reckoning 초기화 가능)
-                    aruco_slam_ailab::msg::MarkerArray empty_array;
+                    aruco_sam_ailab::msg::MarkerArray empty_array;
                     empty_array.header.stamp = msg->header.stamp;
                     empty_array.header.frame_id = camera_frame_;
                     aruco_poses_pub_->publish(empty_array);
@@ -220,69 +247,50 @@ private:
                 cv::aruco::drawDetectedMarkers(debug_image, corners, ids);
 
                 // Create custom MarkerArray for SLAM backend
-                aruco_slam_ailab::msg::MarkerArray marker_array;
+                aruco_sam_ailab::msg::MarkerArray marker_array;
                 marker_array.header.stamp = msg->header.stamp;
                 marker_array.header.frame_id = camera_frame_;
+
+                cv::Mat depth_for_sample;
+                {
+                    std::lock_guard<std::mutex> lock(depth_mutex_);
+                    if (depth_image_valid_ && !latest_depth_image_.empty())
+                        depth_for_sample = latest_depth_image_.clone();
+                }
 
                 for (size_t idx = 0; idx < ids.size(); ++idx) {
                     cv::Vec3d rvec = rvecs[idx];
                     cv::Vec3d tvec = tvecs[idx];
                     int marker_id = ids[idx];
 
-                    // Depth 추정 정확도 로그: 재투영 오차 + RGB(ArUco) 추정 vs 센서 깊이
-                    {
-                        // 마커 3D 코너 (마커 좌표계)
-                        std::vector<cv::Point3f> obj_pts = {
-                            cv::Point3f(-marker_size_/2,  marker_size_/2, 0),
-                            cv::Point3f( marker_size_/2,  marker_size_/2, 0),
-                            cv::Point3f( marker_size_/2, -marker_size_/2, 0),
-                            cv::Point3f(-marker_size_/2, -marker_size_/2, 0)
-                        };
-                        std::vector<cv::Point2f> proj_pts;
-                        cv::projectPoints(obj_pts, rvec, tvec, camera_matrix_, dist_coeffs_, proj_pts);
-                        double err_sum = 0;
-                        for (size_t k = 0; k < 4; ++k) {
-                            double dx = proj_pts[k].x - corners[idx][k].x;
-                            double dy = proj_pts[k].y - corners[idx][k].y;
-                            err_sum += dx*dx + dy*dy;
-                        }
-                        double reproj_error_px = std::sqrt(err_sum / 4.0);
-                        double depth_aruco = tvec[2];
+                    double pos_x = tvec[0], pos_y = tvec[1], pos_z = tvec[2];
 
-                        cv::Mat depth_for_sample;
-                        {
-                            std::lock_guard<std::mutex> lock(depth_mutex_);
-                            if (depth_image_valid_ && !latest_depth_image_.empty())
-                                depth_for_sample = latest_depth_image_.clone();
-                        }
-                        double depth_sensor = sampleDepthAtMarkerCenter(
+                    // Depth 보정: 유효하면 역투영으로 (x,y,z) 교체, 아니면 PnP 유지
+                    if (use_depth_correction_ && !depth_for_sample.empty()) {
+                        double depth_m = sampleDepthInMarkerRegion(
                             depth_for_sample, cv_image.cols, cv_image.rows, corners[idx]);
-
-                        if (depth_sensor > 0.0) {
-                            double err_m = depth_aruco - depth_sensor;
-                            double err_pct = (depth_sensor > 1e-6) ? (100.0 * err_m / depth_sensor) : 0.0;
-                            // RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000,
-                            //     "[Depth accuracy] id=%d | ArUco(RGB)=%.3f m | sensor=%.3f m | err=%.3f m (%.1f%%) | reproj=%.2f px",
-                            //     marker_id, depth_aruco, depth_sensor, err_m, err_pct, reproj_error_px);
-                        } else {
-                            if (debug_enabled_) RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000,
-                                "[Depth] id=%d | ArUco(RGB)=%.3f m | sensor=invalid | reproj_err=%.2f px",
-                                marker_id, depth_aruco, reproj_error_px);
+                        if (depth_m > 0.01 && depth_m <= depth_max_range_) {
+                            float cx = 0, cy = 0;
+                            for (const auto& p : corners[idx]) { cx += p.x; cy += p.y; }
+                            cx /= 4.0f; cy /= 4.0f;
+                            cv::Point3d pt = backProjectToCamera(cx, cy, depth_m);
+                            pos_x = pt.x;
+                            pos_y = pt.y;
+                            pos_z = pt.z;
                         }
                     }
 
-                    // Draw axis on debug image
+                    // Draw axis on debug image (보정된 위치로 시각화)
+                    cv::Vec3d tvec_draw(pos_x, pos_y, pos_z);
                     cv::drawFrameAxes(debug_image, camera_matrix_, dist_coeffs_,
-                                     rvec, tvec, marker_size_ * 0.5);
+                                     rvec, tvec_draw, marker_size_ * 0.5);
 
-                    // Create MarkerObservation
-                    aruco_slam_ailab::msg::MarkerObservation observation;
+                    // Create MarkerObservation (position: Depth 보정 적용됨)
+                    aruco_sam_ailab::msg::MarkerObservation observation;
                     observation.id = marker_id;
-                    
-                    // Set position
-                    observation.pose.position.x = tvec[0];
-                    observation.pose.position.y = tvec[1];
-                    observation.pose.position.z = tvec[2];
+                    observation.pose.position.x = pos_x;
+                    observation.pose.position.y = pos_y;
+                    observation.pose.position.z = pos_z;
 
                     // Convert rotation vector to quaternion
                     cv::Mat rotation_matrix;
@@ -426,7 +434,7 @@ private:
                 }
             } else {
                 // 마커 전혀 없음: 빈 MarkerArray 발행 (graph_optimizer Dead Reckoning용)
-                aruco_slam_ailab::msg::MarkerArray empty_array;
+                aruco_sam_ailab::msg::MarkerArray empty_array;
                 empty_array.header.stamp = msg->header.stamp;
                 empty_array.header.frame_id = camera_frame_;
                 aruco_poses_pub_->publish(empty_array);
@@ -490,7 +498,7 @@ private:
     rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr camera_info_sub_;
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr depth_image_sub_;
     rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr depth_camera_info_sub_;
-    rclcpp::Publisher<aruco_slam_ailab::msg::MarkerArray>::SharedPtr aruco_poses_pub_;
+    rclcpp::Publisher<aruco_sam_ailab::msg::MarkerArray>::SharedPtr aruco_poses_pub_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr visualization_markers_pub_;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr debug_image_pub_;
 
@@ -505,6 +513,10 @@ private:
 
     double marker_size_;
     int vis_marker_id_counter_ = 0;  // 3D 시각화 마커 누적용 고유 ID
+
+    bool use_depth_correction_ = true;
+    double depth_max_range_ = 5.0;
+    int depth_sample_radius_ = 3;
 
     std::mutex depth_mutex_;
     cv::Mat latest_depth_image_;

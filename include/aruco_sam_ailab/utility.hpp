@@ -20,7 +20,7 @@
 #include <mutex>
 #include <string>
 
-namespace aruco_slam_ailab {
+namespace aruco_sam_ailab {
 
 // Utility functions
 template<typename T>
@@ -235,4 +235,4 @@ public:
     }
 };
 
-} // namespace aruco_slam_ailab
+} // namespace aruco_sam_ailab

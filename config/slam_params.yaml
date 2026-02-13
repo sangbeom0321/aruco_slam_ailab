@@ -5,18 +5,27 @@
     odom_topic: "/w_odom"         # OdomBetweenFactor (wheel odom, base_link)
     aruco_poses_topic: "/aruco_poses"
 
-    base_link_frame: "base_link"
+    base_link_frame: "base_footprint"
     camera_frame: "camera_color_optical_frame"
     odom_frame: "odom"
     map_frame: "map"
 
+    # 랜드마크 저장 서비스 저장 위치
+    landmarks_save_path: "/root/ros2_ws/src/aruco_sam_ailab/map/landmarks_map.json"
+
+    # [모드 설정 - 이 파일에서만 변경]
+    # run_mode: "mapping" (맵 생성) | "localization" (위치 추정, 맵 고정)
+    run_mode: "localization"
+    # map_path: Localization 모드에서 로드할 맵 파일 (landmarks_map.json 형식)
+    map_path: "/root/ros2_ws/src/aruco_sam_ailab/map/landmarks_map.json"
+
     # base_link -> camera_color_optical_frame (aruco_poses 프레임, tf2_echo 기준)
-    ext_trans_base_cam: [0.411, 0.049, 0.037]
+    ext_trans_base_cam: [0.411, 0.049, 0.398]
     ext_rot_base_cam: [0.0, 0.0, 1.0,
                       -1.0, 0.0, 0.0,
                        0.0, -1.0, 0.0]
 
-    ext_trans_base_depth_cam: [0.411, 0.049, 0.037]
+    ext_trans_base_depth_cam: [0.411, 0.049, 0.398]
     ext_rot_base_depth_cam: [0.0, 0.0, 1.0,
                             -1.0, 0.0, 0.0,
                              0.0, -1.0, 0.0]
@@ -36,6 +45,10 @@
     # ArUco observation parameters (관측은 camera_color_optical_frame)
     aruco_trans_noise: 0.02        # meters (작을수록 제약 강함)
     aruco_rot_noise: 0.05          # radians (작을수록 제약 강함)
+
+    # ZUPT (Zero Motion Update): 정지 시 ArUco 관측 무시 → 카메라 노이즈로 인한 진동 방지
+    zupt_trans_thresh: 0.01   # meters (1cm 미만 이동이면 정지로 간주)
+    zupt_rot_thresh: 0.008   # radians (약 0.5도 미만 회전이면 정지로 간주)
 
     # Keyframe policy: 아래 조건 중 하나라도 만족하면 키프레임 추가 (OR)
     # - 첫 키프레임: 항상 첫 프레임은 키프레임

@@ -1,5 +1,5 @@
-#include "aruco_slam_ailab/utility.hpp"
-#include "aruco_slam_ailab/msg/optimized_keyframe_state.hpp"
+#include "aruco_sam_ailab/utility.hpp"
+#include "aruco_sam_ailab/msg/optimized_keyframe_state.hpp"
 
 #include <gtsam/navigation/ImuFactor.h>
 #include <gtsam/navigation/ImuBias.h>
@@ -13,14 +13,14 @@ using gtsam::symbol_shorthand::X; // Pose3
 using gtsam::symbol_shorthand::V; // Velocity
 using gtsam::symbol_shorthand::B; // Bias
 
-namespace aruco_slam_ailab {
+namespace aruco_sam_ailab {
 
 class IMUPreintegration : public ParamServer {
 public:
     std::mutex mtx_;
 
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr subImu_;
-    rclcpp::Subscription<aruco_slam_ailab::msg::OptimizedKeyframeState>::SharedPtr subOptimizedKeyframeState_;
+    rclcpp::Subscription<aruco_sam_ailab::msg::OptimizedKeyframeState>::SharedPtr subOptimizedKeyframeState_;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubImuOdometry_;
 
     bool systemInitialized_ = false;
@@ -66,7 +66,7 @@ public:
             imuTopic, 2000,
             std::bind(&IMUPreintegration::imuHandler, this, std::placeholders::_1));
 
-        subOptimizedKeyframeState_ = create_subscription<aruco_slam_ailab::msg::OptimizedKeyframeState>(
+        subOptimizedKeyframeState_ = create_subscription<aruco_sam_ailab::msg::OptimizedKeyframeState>(
             "/optimized_keyframe_state", 10,
             std::bind(&IMUPreintegration::optimizedKeyframeStateCallback, this, std::placeholders::_1));
 
@@ -398,7 +398,7 @@ public:
 
     // Graph optimization 결과 수신: 이 포즈/속도/바이어스로 재초기화하고,
     // 그 시점부터 현재까지 쌓인 IMU 데이터를 "재적분(Re-propagation)" 해야 튐/발산 방지
-    void optimizedKeyframeStateCallback(const aruco_slam_ailab::msg::OptimizedKeyframeState::SharedPtr msg) {
+    void optimizedKeyframeStateCallback(const aruco_sam_ailab::msg::OptimizedKeyframeState::SharedPtr msg) {
         if (msg->bias.size() != 6) {
             RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
                 "[IMU] Ignored optimized_keyframe_state: bias size %zu (expected 6)", msg->bias.size());
@@ -474,7 +474,7 @@ public:
     }
 };
 
-} // namespace aruco_slam_ailab
+} // namespace aruco_sam_ailab
 
 int main(int argc, char** argv) {
     rclcpp::init(argc, argv);
@@ -482,7 +482,7 @@ int main(int argc, char** argv) {
     rclcpp::NodeOptions options;
     options.use_intra_process_comms(true);
 
-    auto node = std::make_shared<aruco_slam_ailab::IMUPreintegration>(options);
+    auto node = std::make_shared<aruco_sam_ailab::IMUPreintegration>(options);
 
     RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "\033[1;32m----> IMU Preintegration Started.\033[0m");
 

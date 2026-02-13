@@ -1,5 +1,5 @@
-# Context: 'aruco_slam_ailab' ROS 2 Package (Humble)
-You are developing within an existing ROS 2 package named `aruco_slam_ailab`.
+# Context: 'aruco_sam_ailab' ROS 2 Package (Humble)
+You are developing within an existing ROS 2 package named `aruco_sam_ailab`.
 Do NOT create a new ROS package. Respect and preserve existing file structure.
 
 ## Goal
@@ -19,7 +19,7 @@ Implement a Factor Graph SLAM backend using GTSAM (ISAM2) with:
 3. TF: map -> odom (and optionally odom -> base_link if required)
 
 ## System Constraints
-- No new package creation. Only modify within `aruco_slam_ailab`.
+- No new package creation. Only modify within `aruco_sam_ailab`.
 - Loop closure is strictly marker-ID based:
   re-observing the same ArUco ID adds an additional constraint to the same landmark variable.
 - Keep code modular: separate preintegration and graph optimization nodes.

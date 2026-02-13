@@ -1,5 +1,5 @@
-#include "aruco_slam_ailab/utility.hpp"
-#include "aruco_slam_ailab/msg/marker_array.hpp"
+#include "aruco_sam_ailab/utility.hpp"
+#include "aruco_sam_ailab/msg/marker_array.hpp"
 #include <gtsam/nonlinear/ISAM2.h>
 #include <gtsam/nonlinear/NonlinearFactorGraph.h>
 #include <gtsam/nonlinear/Values.h>
@@ -10,17 +10,21 @@
 #include <nav_msgs/msg/path.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
+#include <std_srvs/srv/trigger.hpp>
 #include <tf2_ros/transform_broadcaster.h>
 #include <mutex>
 #include <deque>
 #include <set>
 #include <vector>
 #include <cmath>
+#include <fstream>
+#include <sstream>
+#include <cstdlib>
 
 using gtsam::symbol_shorthand::X; // Robot Pose (base_link)
 using gtsam::symbol_shorthand::L; // Landmark Pose (World/Map frame)
 
-namespace aruco_slam_ailab {
+namespace aruco_sam_ailab {
 
 class GraphOptimizer : public ParamServer {
 public:
@@ -47,19 +51,31 @@ public:
     static constexpr double keyframeAngleThresh_ = 0.2; // 약 11.5도 (rad)
     static constexpr double keyframeTimeThresh_ = 2.0;   // 2초 (Keep Alive)
 
+    // ZUPT 파라미터 (정지 판단 임계값)
+    double zuptTransThresh_ = 0.01;   // 1cm
+    double zuptRotThresh_ = 0.008;    // 약 0.5도 (rad)
+
     // Data Buffers & Maps
     std::deque<nav_msgs::msg::Odometry> odomQueue_;
     std::map<int, gtsam::Key> landmarkIdToKey_; // MarkerID -> GTSAM Key(L)
 
     // ROS Interface
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr subWheelOdom_;
-    rclcpp::Subscription<aruco_slam_ailab::msg::MarkerArray>::SharedPtr subAruco_;
+    rclcpp::Subscription<aruco_sam_ailab::msg::MarkerArray>::SharedPtr subAruco_;
 
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubGlobalOdom_;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubWheelOdomCorrection_;  // Wheel Odom 보정 신호
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubPath_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pubLandmarks_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pubDebugMap_;
+
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr saveLandmarksSrv_;
+    std::string landmarksSavePath_;
+
+    // Mapping vs Localization
+    bool isLocalizationMode_ = false;
+    std::string mapPath_;
+    gtsam::noiseModel::Diagonal::shared_ptr fixedLandmarkNoise_;
 
     nav_msgs::msg::Path globalPath_;
     std::unique_ptr<tf2_ros::TransformBroadcaster> tfBroadcaster_;
@@ -81,7 +97,7 @@ public:
                 if(odomQueue_.size() > 200) odomQueue_.pop_front();
             });
 
-        subAruco_ = create_subscription<aruco_slam_ailab::msg::MarkerArray>(
+        subAruco_ = create_subscription<aruco_sam_ailab::msg::MarkerArray>(
             arucoPosesTopic, 10,
             std::bind(&GraphOptimizer::arucoHandler, this, std::placeholders::_1));
 
@@ -92,6 +108,30 @@ public:
         pubLandmarks_ = create_publisher<visualization_msgs::msg::MarkerArray>("/aruco_slam/landmarks", 10);
         pubDebugMap_ = create_publisher<visualization_msgs::msg::MarkerArray>("/aruco_slam/debug_markers", 10);
         tfBroadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
+
+        // 2.5. Save Landmarks Service
+        declare_parameter("landmarks_save_path", "landmarks_map.json");
+        get_parameter("landmarks_save_path", landmarksSavePath_);
+        saveLandmarksSrv_ = create_service<std_srvs::srv::Trigger>(
+            "save_landmarks",
+            std::bind(&GraphOptimizer::saveLandmarksCallback, this,
+                      std::placeholders::_1, std::placeholders::_2));
+
+        // 2.6. Run Mode (mapping vs localization)
+        declare_parameter("run_mode", "mapping");
+        declare_parameter("map_path", "landmarks_map.json");
+
+        // 2.7. ZUPT (Zero Motion Update) 임계값
+        declare_parameter("zupt_trans_thresh", 0.01);
+        declare_parameter("zupt_rot_thresh", 0.008);
+        get_parameter("zupt_trans_thresh", zuptTransThresh_);
+        get_parameter("zupt_rot_thresh", zuptRotThresh_);
+        std::string runModeStr;
+        get_parameter("run_mode", runModeStr);
+        get_parameter("map_path", mapPath_);
+        isLocalizationMode_ = (runModeStr == "localization");
+        fixedLandmarkNoise_ = gtsam::noiseModel::Diagonal::Sigmas(
+            (gtsam::Vector(6) << 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6).finished());
 
         // 3. GTSAM Settings
         gtsam::ISAM2Params params;
@@ -118,16 +158,23 @@ public:
         gtsam::Point3 trans(extTransBaseDepthCam.x(), extTransBaseDepthCam.y(), extTransBaseDepthCam.z());
         baseToCam_ = gtsam::Pose3(rot, trans);
 
-        RCLCPP_INFO(get_logger(), "Graph Optimizer Initialized.");
+        // 6. Localization Mode: Load map (fixed landmarks)
+        if (isLocalizationMode_) {
+            loadMap(mapPath_);
+            RCLCPP_INFO(get_logger(), "Graph Optimizer Initialized (Localization Mode, %zu landmarks loaded).",
+                        landmarkIdToKey_.size());
+        } else {
+            RCLCPP_INFO(get_logger(), "Graph Optimizer Initialized (Mapping Mode).");
+        }
     }
 
     // 메인 콜백: ArUco 데이터가 들어오면 SLAM 수행
-    void arucoHandler(const aruco_slam_ailab::msg::MarkerArray::SharedPtr msg) {
+    void arucoHandler(const aruco_sam_ailab::msg::MarkerArray::SharedPtr msg) {
         std::lock_guard<std::mutex> lock(mtx_);
 
         // [중요] 1. 들어온 마커 데이터를 즉시 "로봇 좌표계(base_link)"로 변환
         // 이후 모든 로직은 Camera 좌표계를 신경 쓰지 않음.
-        aruco_slam_ailab::msg::MarkerArray markersInBase;
+        aruco_sam_ailab::msg::MarkerArray markersInBase;
         markersInBase.header = msg->header;
 
         for (const auto& rawMarker : msg->markers) {
@@ -153,10 +200,61 @@ public:
         std::vector<int> currMarkerIds;
         for (const auto& m : markersInBase.markers) currMarkerIds.push_back(m.id);
 
+        // [ZUPT] 3.5. 정지 상태 판단: 오도메트리 변화량이 극히 작으면 ArUco 관측 무시
+        bool isStationary = false;
+        if (systemInitialized_) {
+            gtsam::Pose3 odomDelta = lastKeyframeOdomPose_.between(currOdomPose);
+            double transNorm = odomDelta.translation().norm();
+            double rotAngle = std::abs(odomDelta.rotation().axisAngle().second);
+            // ZUPT: 임계값 미만 움직임이면 정지 상태로 간주
+            if (transNorm < zuptTransThresh_ && rotAngle < zuptRotThresh_) {
+                isStationary = true;
+            }
+        }
+
         // 4. SLAM Process
         if (!systemInitialized_) {
-            initializeSystem(markersInBase, currOdom);
+            if (isLocalizationMode_) {
+                // 아는 마커가 보일 때까지 대기, 보이면 역산으로 초기화
+                for (const auto& m : markersInBase.markers) {
+                    if (landmarkIdToKey_.count(static_cast<int>(m.id))) {
+                        int mid = static_cast<int>(m.id);
+                        gtsam::Pose3 L_map = isam_.calculateEstimate().at<gtsam::Pose3>(L(mid));
+                        gtsam::Pose3 L_base = poseMsgToGtsam(m.pose);
+                        gtsam::Pose3 initialPose = L_map.compose(L_base.inverse());
+                        initializeSystemAt(initialPose, currOdom);
+                        lastVisibleMarkers_.clear();
+                        for (const auto& mk : markersInBase.markers) lastVisibleMarkers_.insert(mk.id);
+                        addLandmarkFactors(0, markersInBase);
+                        isam_.update(graphFactors_, graphValues_);
+                        graphFactors_.resize(0);
+                        graphValues_.clear();
+                        currentEstimate_ = isam_.calculateEstimate().at<gtsam::Pose3>(X(0));
+                        publishResults(msg->header.stamp, lastOdomPose_);
+                        return;
+                    }
+                }
+                // 디버그: 감지된 ID vs 맵에 있는 ID
+                std::string detectedIds, mapIds;
+                for (const auto& m : markersInBase.markers) detectedIds += std::to_string(m.id) + " ";
+                for (const auto& p : landmarkIdToKey_) mapIds += std::to_string(p.first) + " ";
+                RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+                    "Localization: Waiting for known marker. Detected: [%s] | Map has: [%s]",
+                    detectedIds.empty() ? "(none)" : detectedIds.c_str(),
+                    mapIds.empty() ? "(load failed?)" : mapIds.c_str());
+                return;
+            } else {
+                initializeSystem(markersInBase, currOdom);
+            }
         } else {
+            // [ZUPT] 정지 상태면 ArUco Factor 추가/최적화 생략 → 카메라 노이즈로 인한 진동 방지
+            if (isStationary) {
+                gtsam::Pose3 odomDelta = lastKeyframeOdomPose_.between(currOdomPose);
+                gtsam::Pose3 estimatedPose = currentEstimate_.compose(odomDelta);
+                publishTFOnly(estimatedPose, msg->header.stamp, currOdomPose);
+                return;
+            }
+
             // [핵심] 키프레임인지 판단
             if (needNewKeyframe(currOdomPose, msg->header.stamp, currMarkerIds)) {
                 // Case A: 키프레임 → 그래프 추가 + 최적화
@@ -166,10 +264,10 @@ public:
                 lastVisibleMarkers_.clear();
                 for (int id : currMarkerIds) lastVisibleMarkers_.insert(id);
             } else {
-                // Case B: 키프레임 아님 → Dead Reckoning (TF/Path만 부드럽게 발행)
+                // Case B: 키프레임 아님 → Dead Reckoning (TF map->odom, Path 부드럽게 발행)
                 gtsam::Pose3 odomDelta = lastKeyframeOdomPose_.between(currOdomPose);
                 gtsam::Pose3 estimatedPose = currentEstimate_.compose(odomDelta);
-                publishTFOnly(estimatedPose, msg->header.stamp);
+                publishTFOnly(estimatedPose, msg->header.stamp, currOdomPose);
             }
         }
     }
@@ -203,41 +301,38 @@ public:
         return false;
     }
 
-    void initializeSystem(const aruco_slam_ailab::msg::MarkerArray& markers, const nav_msgs::msg::Odometry& odom) {
-        // [핵심] 마커가 없어도 초기화 진행! (점프 현상 방지)
-        // 로봇이 움직이는 동안 SLAM 좌표계도 Dead Reckoning으로 이동하고,
-        // 나중에 마커 발견 시 연속적으로 이어짐 (0,0,0 강제 리셋 없음)
+    void initializeSystem(const aruco_sam_ailab::msg::MarkerArray& markers, const nav_msgs::msg::Odometry& odom) {
+        initializeSystemAt(gtsam::Pose3(), odom);
+        lastVisibleMarkers_.clear();
+        for (const auto& m : markers.markers) lastVisibleMarkers_.insert(m.id);
+        addLandmarkFactors(0, markers);
+        isam_.update(graphFactors_, graphValues_);
+        graphFactors_.resize(0);
+        graphValues_.clear();
+        RCLCPP_INFO(get_logger(), "System Initialized at Frame 0 (Markers: %zu)", markers.markers.size());
+    }
 
-        // 시스템 원점을 (0,0,0)으로 고정
-        currentEstimate_ = gtsam::Pose3();
+    void initializeSystemAt(const gtsam::Pose3& startPose, const nav_msgs::msg::Odometry& odom) {
+        currentEstimate_ = startPose;
         lastOdomPose_ = poseMsgToGtsam(odom.pose.pose);
         lastKeyframeOdomPose_ = lastOdomPose_;
         lastKeyframeTime_ = odom.header.stamp;
         lastVisibleMarkers_.clear();
-        for (const auto& m : markers.markers) lastVisibleMarkers_.insert(m.id);
 
-        // Prior Factor 추가 (X0 고정)
-        graphValues_.insert(X(0), currentEstimate_);
-        graphFactors_.add(gtsam::PriorFactor<gtsam::Pose3>(X(0), currentEstimate_, priorNoise_));
-
-        // 첫 프레임의 랜드마크 추가
-        addLandmarkFactors(0, markers);
-
-        // 초기 최적화
-        isam_.update(graphFactors_, graphValues_);
-        graphFactors_.resize(0);
-        graphValues_.clear();
+        graphValues_.insert(X(0), startPose);
+        graphFactors_.add(gtsam::PriorFactor<gtsam::Pose3>(X(0), startPose, priorNoise_));
 
         systemInitialized_ = true;
         frameIdx_ = 0;
 
-        // 초기화 직후에도 보정 신호 전송 (0점에서 시작하라고 Wheel Odom에 알림)
+        publishMapToOdomTF(currentEstimate_, lastOdomPose_, odom.header.stamp);
         publishCorrection(currentEstimate_, odom.header.stamp);
 
-        RCLCPP_INFO(get_logger(), "System Initialized at Frame 0 (Markers: %zu)", markers.markers.size());
+        RCLCPP_INFO(get_logger(), "System Initialized at pose (%.2f, %.2f, %.2f)",
+                    startPose.translation().x(), startPose.translation().y(), startPose.translation().z());
     }
 
-    void processKeyframe(const aruco_slam_ailab::msg::MarkerArray& markers,
+    void processKeyframe(const aruco_sam_ailab::msg::MarkerArray& markers,
                          const gtsam::Pose3& currOdomPose, const rclcpp::Time& stamp) {
         frameIdx_++;
 
@@ -270,8 +365,8 @@ public:
             gtsam::Values result = isam_.calculateEstimate();
             currentEstimate_ = result.at<gtsam::Pose3>(X(frameIdx_));
 
-            // 시각화, TF 발행 및 Wheel Odom 보정 신호 송출
-            publishResults(stamp);
+            // 시각화, TF(map->odom) 발행 및 Wheel Odom 보정 신호 송출
+            publishResults(stamp, currOdomPose);
             publishCorrection(currentEstimate_, stamp);
 
         } catch (const std::exception& e) {
@@ -298,21 +393,29 @@ public:
         pubWheelOdomCorrection_->publish(correctionMsg);
     }
 
-    void publishTFOnly(const gtsam::Pose3& estimatedPose, const rclcpp::Time& stamp) {
-        // TF (map -> base_link)
+    void publishMapToOdomTF(const gtsam::Pose3& mapToBase, const gtsam::Pose3& odomToBase, const rclcpp::Time& stamp) {
+        // REP-105: map->odom 발행 (제어는 odom->base만 사용 → SLAM 튐에 영향 없음)
+        // map_to_base = map_to_odom * odom_to_base  =>  map_to_odom = map_to_base * odom_to_base.inverse()
+        gtsam::Pose3 mapToOdom = mapToBase.compose(odomToBase.inverse());
+
         geometry_msgs::msg::TransformStamped t;
         t.header.stamp = stamp;
         t.header.frame_id = mapFrame;
-        t.child_frame_id = baseLinkFrame;
-        t.transform.translation.x = estimatedPose.translation().x();
-        t.transform.translation.y = estimatedPose.translation().y();
-        t.transform.translation.z = estimatedPose.translation().z();
-        auto q = estimatedPose.rotation().toQuaternion();
+        t.child_frame_id = odomFrame;
+        t.transform.translation.x = mapToOdom.translation().x();
+        t.transform.translation.y = mapToOdom.translation().y();
+        t.transform.translation.z = mapToOdom.translation().z();
+        auto q = mapToOdom.rotation().toQuaternion();
         t.transform.rotation.w = q.w();
         t.transform.rotation.x = q.x();
         t.transform.rotation.y = q.y();
         t.transform.rotation.z = q.z();
         tfBroadcaster_->sendTransform(t);
+    }
+
+    void publishTFOnly(const gtsam::Pose3& estimatedPose, const rclcpp::Time& stamp,
+                      const gtsam::Pose3& odomToBase) {
+        publishMapToOdomTF(estimatedPose, odomToBase, stamp);
 
         // Path (부드러운 시각화용)
         geometry_msgs::msg::PoseStamped p;
@@ -333,39 +436,38 @@ public:
     }
 
     // [핵심 수정] 큐 탐색 없이 인자로 받은 마커(이미 base_link 기준)를 바로 사용
-    void addLandmarkFactors(int currentFrameIdx, const aruco_slam_ailab::msg::MarkerArray& markers) {
+    void addLandmarkFactors(int currentFrameIdx, const aruco_sam_ailab::msg::MarkerArray& markers) {
         for (const auto& marker : markers.markers) {
             int mid = marker.id;
-            // Measurement: T_base_marker (이미 변환됨)
-            gtsam::Pose3 measurement = poseMsgToGtsam(marker.pose);
+            gtsam::Pose3 measurement = poseMsgToGtsam(marker.pose);  // T_base_marker
+            bool knownLandmark = (landmarkIdToKey_.find(mid) != landmarkIdToKey_.end());
 
-            // 랜드마크 키 관리
-            gtsam::Key landmarkKey;
-            if (landmarkIdToKey_.find(mid) == landmarkIdToKey_.end()) {
-                // 새로운 랜드마크 발견!
-                landmarkKey = L(mid); // ID를 그대로 사용하거나, 순차적으로 부여
-                landmarkIdToKey_[mid] = landmarkKey;
-
-                // 초기 위치 추정: T_map_marker = T_map_base * T_base_marker
-                // 주의: 이때 currentEstimate_는 아직 최적화 전(Prediction) 상태일 수 있음.
-                gtsam::Pose3 initialLandmarkPose;
-                if(graphValues_.exists(X(currentFrameIdx))) {
-                     initialLandmarkPose = graphValues_.at<gtsam::Pose3>(X(currentFrameIdx)).compose(measurement);
-                } else {
-                     initialLandmarkPose = currentEstimate_.compose(measurement);
-                }
-
-                graphValues_.insert(landmarkKey, initialLandmarkPose);
-
-                // [특이점 방지] 처음 본 랜드마크에 약한 Prior를 걸어 계산 폭주 방지
-                graphFactors_.add(gtsam::PriorFactor<gtsam::Pose3>(landmarkKey, initialLandmarkPose, landmarkPriorNoise_));
+            if (isLocalizationMode_) {
+                // Localization: 지도에 있는 마커만 사용 (로봇 위치 보정용)
+                if (!knownLandmark) continue;  // 모르는 마커 무시
+                gtsam::Key landmarkKey = landmarkIdToKey_[mid];
+                graphFactors_.add(gtsam::BetweenFactor<gtsam::Pose3>(
+                    X(currentFrameIdx), landmarkKey, measurement, obsNoise_));
             } else {
-                landmarkKey = landmarkIdToKey_[mid];
+                // Mapping: 기존 로직 (새 랜드마크 추가 가능)
+                gtsam::Key landmarkKey;
+                if (!knownLandmark) {
+                    landmarkKey = L(mid);
+                    landmarkIdToKey_[mid] = landmarkKey;
+                    gtsam::Pose3 initialLandmarkPose;
+                    if (graphValues_.exists(X(currentFrameIdx))) {
+                        initialLandmarkPose = graphValues_.at<gtsam::Pose3>(X(currentFrameIdx)).compose(measurement);
+                    } else {
+                        initialLandmarkPose = currentEstimate_.compose(measurement);
+                    }
+                    graphValues_.insert(landmarkKey, initialLandmarkPose);
+                    graphFactors_.add(gtsam::PriorFactor<gtsam::Pose3>(landmarkKey, initialLandmarkPose, landmarkPriorNoise_));
+                } else {
+                    landmarkKey = landmarkIdToKey_[mid];
+                }
+                graphFactors_.add(gtsam::BetweenFactor<gtsam::Pose3>(
+                    X(currentFrameIdx), landmarkKey, measurement, obsNoise_));
             }
-
-            // Measurement Factor 추가 (BetweenFactor: Robot -> Landmark)
-            graphFactors_.add(gtsam::BetweenFactor<gtsam::Pose3>(
-                X(currentFrameIdx), landmarkKey, measurement, obsNoise_));
         }
     }
 
@@ -385,28 +487,20 @@ public:
     }
 
     // Helper: 시각화 모음
-    void publishResults(const rclcpp::Time& stamp) {
-        // 1. Path
+    void publishResults(const rclcpp::Time& stamp, const gtsam::Pose3& odomToBase) {
+        // 1. Path (map 기준)
         geometry_msgs::msg::PoseStamped p;
         p.header.stamp = stamp;
-        p.header.frame_id = mapFrame; // Global Frame
+        p.header.frame_id = mapFrame;
         p.pose = gtsamToPoseMsg(currentEstimate_);
         globalPath_.header = p.header;
         globalPath_.poses.push_back(p);
         pubPath_->publish(globalPath_);
 
-        // 2. TF (map -> base_link)
-        geometry_msgs::msg::TransformStamped t;
-        t.header.stamp = stamp;
-        t.header.frame_id = mapFrame;
-        t.child_frame_id = baseLinkFrame; // SLAM 결과가 base_link의 위치임
-        t.transform.translation.x = p.pose.position.x;
-        t.transform.translation.y = p.pose.position.y;
-        t.transform.translation.z = p.pose.position.z;
-        t.transform.rotation = p.pose.orientation;
-        tfBroadcaster_->sendTransform(t);
+        // 2. TF (map -> odom) REP-105: 제어는 odom->base만 사용
+        publishMapToOdomTF(currentEstimate_, odomToBase, stamp);
 
-        // 3. Global Odometry
+        // 3. Global Odometry (map 기준, 경로 계획용)
         nav_msgs::msg::Odometry odom;
         odom.header.stamp = stamp;
         odom.header.frame_id = mapFrame;
@@ -443,7 +537,9 @@ public:
             sphere.id = markerId;
             sphere.type = visualization_msgs::msg::Marker::SPHERE;
             sphere.action = visualization_msgs::msg::Marker::ADD;
-            sphere.pose.position = poseMsgMap.position;
+            sphere.pose.position.x = poseMap.translation().x();
+            sphere.pose.position.y = poseMap.translation().y();
+            sphere.pose.position.z = poseMap.translation().z();
             sphere.pose.orientation.w = 1.0;
             sphere.pose.orientation.x = sphere.pose.orientation.y = sphere.pose.orientation.z = 0.0;
             sphere.scale.x = sphere.scale.y = sphere.scale.z = 0.2;
@@ -461,8 +557,10 @@ public:
             text.id = markerId;
             text.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
             text.action = visualization_msgs::msg::Marker::ADD;
-            text.pose = poseMsgMap;
-            text.pose.position.z += 0.15;
+            text.pose.position.x = poseMap.translation().x();
+            text.pose.position.y = poseMap.translation().y();
+            text.pose.position.z = poseMap.translation().z() + 0.15;
+            text.pose.orientation = poseMsgMap.orientation;
             text.scale.z = 0.3;
             text.color.r = 1.0f;
             text.color.g = 1.0f;
@@ -474,9 +572,152 @@ public:
         }
         pubLandmarks_->publish(arr);
     }
+
+    // JSON에서 숫자 추출: "key": value 형태
+    static double extractJsonDouble(const std::string& s, const std::string& key, size_t start = 0) {
+        std::string pattern = "\"" + key + "\":";
+        size_t p = s.find(pattern, start);
+        if (p == std::string::npos) return 0.0;
+        p += pattern.size();
+        return std::stod(s.substr(p));
+    }
+    static int extractJsonInt(const std::string& s, const std::string& key, size_t start = 0) {
+        std::string pattern = "\"" + key + "\":";
+        size_t p = s.find(pattern, start);
+        if (p == std::string::npos) return 0;
+        p += pattern.size();
+        return std::stoi(s.substr(p));
+    }
+
+    void loadMap(const std::string& filename) {
+        std::ifstream file(filename);
+        if (!file.is_open()) {
+            RCLCPP_ERROR(get_logger(), "loadMap: Failed to open %s", filename.c_str());
+            return;
+        }
+        std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+        file.close();
+
+        size_t landmarksPos = content.find("\"landmarks\"");
+        if (landmarksPos == std::string::npos) {
+            RCLCPP_ERROR(get_logger(), "loadMap: No 'landmarks' key in %s", filename.c_str());
+            return;
+        }
+        size_t arrStart = content.find('[', landmarksPos);
+        if (arrStart == std::string::npos) return;
+
+        graphFactors_.resize(0);
+        graphValues_.clear();
+        landmarkIdToKey_.clear();
+
+        size_t pos = arrStart + 1;
+        while (pos < content.size()) {
+            size_t objStart = content.find('{', pos);
+            if (objStart == std::string::npos) break;
+            // 중첩된 {} 매칭: position{"x":..} 등으로 첫 }가 잘못된 객체 끝이 됨
+            int depth = 1;
+            size_t objEnd = objStart + 1;
+            for (; objEnd < content.size() && depth > 0; objEnd++) {
+                if (content[objEnd] == '{') depth++;
+                else if (content[objEnd] == '}') depth--;
+            }
+            if (depth != 0) break;
+
+            std::string obj = content.substr(objStart, objEnd - objStart + 1);
+            int id = extractJsonInt(obj, "id");
+            size_t posIdx = obj.find("\"position\"");
+            size_t oriIdx = obj.find("\"orientation\"");
+            if (posIdx == std::string::npos || oriIdx == std::string::npos) {
+                RCLCPP_WARN(get_logger(), "loadMap: Skip landmark id=%d (missing position/orientation)", id);
+                pos = objEnd + 1;
+                continue;
+            }
+            std::string posBlock = obj.substr(posIdx, oriIdx - posIdx);
+            std::string oriBlock = obj.substr(oriIdx);
+            double x = extractJsonDouble(posBlock, "x");
+            double y = extractJsonDouble(posBlock, "y");
+            double z = extractJsonDouble(posBlock, "z");
+            double qw = extractJsonDouble(oriBlock, "w");
+            double qx = extractJsonDouble(oriBlock, "x");
+            double qy = extractJsonDouble(oriBlock, "y");
+            double qz = extractJsonDouble(oriBlock, "z");
+
+            gtsam::Key key = L(id);
+            landmarkIdToKey_[id] = key;
+            gtsam::Pose3 pose(gtsam::Rot3::Quaternion(qw, qx, qy, qz), gtsam::Point3(x, y, z));
+            graphValues_.insert(key, pose);
+            graphFactors_.add(gtsam::PriorFactor<gtsam::Pose3>(key, pose, fixedLandmarkNoise_));
+
+            pos = objEnd + 1;
+        }
+
+        isam_.update(graphFactors_, graphValues_);
+        graphFactors_.resize(0);
+        graphValues_.clear();
+        std::string idsStr;
+        for (const auto& p : landmarkIdToKey_) idsStr += std::to_string(p.first) + " ";
+        RCLCPP_INFO(get_logger(), "loadMap: Loaded %zu landmarks from %s [ids: %s]", landmarkIdToKey_.size(),
+                    filename.c_str(), idsStr.c_str());
+    }
+
+    void saveLandmarksCallback(const std_srvs::srv::Trigger::Request::SharedPtr /*request*/,
+                               std_srvs::srv::Trigger::Response::SharedPtr response) {
+        std::lock_guard<std::mutex> lock(mtx_);
+        if (landmarkIdToKey_.empty()) {
+            response->success = false;
+            response->message = "No landmarks to save.";
+            RCLCPP_WARN(get_logger(), "save_landmarks: No landmarks in graph.");
+            return;
+        }
+        gtsam::Values est;
+        try {
+            est = isam_.calculateEstimate();
+        } catch (const std::exception& e) {
+            response->success = false;
+            response->message = std::string("Failed to get estimate: ") + e.what();
+            RCLCPP_ERROR(get_logger(), "save_landmarks: %s", e.what());
+            return;
+        }
+        std::ostringstream json;
+        json << "{\n";
+        json << "  \"frame_id\": \"" << mapFrame << "\",\n";
+        json << "  \"timestamp\": \"" << now().seconds() << "\",\n";
+        json << "  \"landmarks\": [\n";
+        bool first = true;
+        size_t savedCount = 0;
+        for (const auto& [markerId, landmarkKey] : landmarkIdToKey_) {
+            if (!est.exists(landmarkKey)) continue;
+            gtsam::Pose3 poseMap = est.at<gtsam::Pose3>(landmarkKey);
+            auto q = poseMap.rotation().toQuaternion();
+            if (!first) json << ",\n";
+            json << "    {\n";
+            json << "      \"id\": " << markerId << ",\n";
+            json << "      \"position\": {\"x\": " << poseMap.translation().x() << ", \"y\": "
+                 << poseMap.translation().y() << ", \"z\": " << poseMap.translation().z() << "},\n";
+            json << "      \"orientation\": {\"w\": " << q.w() << ", \"x\": " << q.x()
+                 << ", \"y\": " << q.y() << ", \"z\": " << q.z() << "}\n";
+            json << "    }";
+            first = false;
+            savedCount++;
+        }
+        json << "\n  ]\n}\n";
+        std::ofstream ofs(landmarksSavePath_);
+        if (!ofs) {
+            response->success = false;
+            response->message = "Failed to open file: " + landmarksSavePath_;
+            RCLCPP_ERROR(get_logger(), "save_landmarks: Cannot open %s", landmarksSavePath_.c_str());
+            return;
+        }
+        ofs << json.str();
+        ofs.close();
+        response->success = true;
+        response->message = "Saved " + std::to_string(savedCount) +
+                           " landmarks to " + landmarksSavePath_;
+        RCLCPP_INFO(get_logger(), "save_landmarks: %s", response->message.c_str());
+    }
 };
 
-} // namespace aruco_slam_ailab
+} // namespace aruco_sam_ailab
 
 int main(int argc, char** argv) {
     rclcpp::init(argc, argv);
@@ -484,7 +725,7 @@ int main(int argc, char** argv) {
     rclcpp::NodeOptions options;
     options.use_intra_process_comms(true);
 
-    auto node = std::make_shared<aruco_slam_ailab::GraphOptimizer>(options);
+    auto node = std::make_shared<aruco_sam_ailab::GraphOptimizer>(options);
 
     RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "\033[1;32m----> Graph Optimizer Started.\033[0m");
 

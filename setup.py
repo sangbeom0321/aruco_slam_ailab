@@ -2,7 +2,7 @@ from setuptools import setup
 import os
 from glob import glob
 
-package_name = 'aruco_slam_ailab'
+package_name = 'aruco_sam_ailab'
 
 setup(
     name=package_name,
@@ -26,8 +26,8 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'aruco_detector_node = aruco_slam_ailab.aruco_detector_node:main',
-            'aruco_global_position = aruco_slam_ailab.aruco_global_position:main',
+            'aruco_detector_node = aruco_sam_ailab.aruco_detector_node:main',
+            'aruco_global_position = aruco_sam_ailab.aruco_global_position:main',
         ],
     },
 )

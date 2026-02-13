@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.8)
-project(aruco_slam_ailab)
+project(aruco_sam_ailab)
 
 # Set C++ standard
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
@@ -19,6 +19,7 @@ find_package(sensor_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
 find_package(visualization_msgs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
@@ -89,6 +90,16 @@ install(DIRECTORY config
     DESTINATION share/${PROJECT_NAME}/
 )
 
+# Install map directory (landmarks_map.json for localization)
+install(DIRECTORY map
+    DESTINATION share/${PROJECT_NAME}/
+)
+
+# Install Python scripts (landmark boundary occupancy grid for localization)
+install(PROGRAMS scripts/landmark_boundary_occupancy_grid_node.py
+    DESTINATION lib/${PROJECT_NAME}
+)
+
 # C++ executables
 # Note: Source files will be created in Step 3-4
 # For now, we prepare the structure
@@ -129,6 +140,7 @@ ament_target_dependencies(graph_optimizer
   nav_msgs
   geometry_msgs
   std_msgs
+  std_srvs
   visualization_msgs
   tf2
   tf2_ros
