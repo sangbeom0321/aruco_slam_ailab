@@ -1,0 +1,199 @@
+material Aruco/Marker0
+{
+  technique
+  {
+    pass
+    {
+      lighting off
+      depth_write on
+      scene_blend replace
+
+      texture_unit
+      {
+        texture aruco_4x4_50_id0.png
+        filtering anisotropic
+        max_anisotropy 8
+      }
+    }
+  }
+}
+
+material Aruco/Marker1
+{
+  technique
+  {
+    pass
+    {
+      lighting off
+      depth_write on
+      scene_blend replace
+
+      texture_unit
+      {
+        texture aruco_4x4_50_id1.png
+        filtering anisotropic
+        max_anisotropy 8
+      }
+    }
+  }
+}
+
+material Aruco/Marker2
+{
+  technique
+  {
+    pass
+    {
+      lighting off
+      depth_write on
+      scene_blend replace
+
+      texture_unit
+      {
+        texture aruco_4x4_50_id2.png
+        filtering anisotropic
+        max_anisotropy 8
+      }
+    }
+  }
+}
+
+material Aruco/Marker3
+{
+  technique
+  {
+    pass
+    {
+      lighting off
+      depth_write on
+      scene_blend replace
+
+      texture_unit
+      {
+        texture aruco_4x4_50_id3.png
+        filtering anisotropic
+        max_anisotropy 8
+      }
+    }
+  }
+}
+
+material Aruco/Marker4
+{
+  technique
+  {
+    pass
+    {
+      lighting off
+      depth_write on
+      scene_blend replace
+
+      texture_unit
+      {
+        texture aruco_4x4_50_id4.png
+        filtering anisotropic
+        max_anisotropy 8
+      }
+    }
+  }
+}
+
+material Aruco/Marker5
+{
+  technique
+  {
+    pass
+    {
+      lighting off
+      depth_write on
+      scene_blend replace
+
+      texture_unit
+      {
+        texture aruco_4x4_50_id5.png
+        filtering anisotropic
+        max_anisotropy 8
+      }
+    }
+  }
+}
+
+material Aruco/Marker6
+{
+  technique
+  {
+    pass
+    {
+      lighting off
+      depth_write on
+      scene_blend replace
+
+      texture_unit
+      {
+        texture aruco_4x4_50_id6.png
+        filtering anisotropic
+        max_anisotropy 8
+      }
+    }
+  }
+}
+
+material Aruco/Marker7
+{
+  technique
+  {
+    pass
+    {
+      lighting off
+      depth_write on
+      scene_blend replace
+
+      texture_unit
+      {
+        texture aruco_4x4_50_id7.png
+        filtering anisotropic
+        max_anisotropy 8
+      }
+    }
+  }
+}
+
+material Aruco/Marker8
+{
+  technique
+  {
+    pass
+    {
+      lighting off
+      depth_write on
+      scene_blend replace
+
+      texture_unit
+      {
+        texture aruco_4x4_50_id8.png
+        filtering anisotropic
+        max_anisotropy 8
+      }
+    }
+  }
+}
+
+material Aruco/Marker9
+{
+  technique
+  {
+    pass
+    {
+      lighting off
+      depth_write on
+      scene_blend replace
+
+      texture_unit
+      {
+        texture aruco_4x4_50_id9.png
+        filtering anisotropic
+        max_anisotropy 8
+      }
+    }
+  }
+}
