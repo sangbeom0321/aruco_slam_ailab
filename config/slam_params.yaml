@@ -17,7 +17,7 @@
     # run_mode: "mapping" (맵 생성) | "localization" (위치 추정, 맵 고정)
     run_mode: "localization"
     # map_path: Localization 모드에서 로드할 맵 파일 (landmarks_map.json 형식)
-    map_path: "/root/ros2_ws/src/aruco_sam_ailab/map/landmarks_map.json"
+    map_path: "/home/ubuntu/ros_ws/src/aruco_sam_ailab/map/landmarks_map.json"
 
     # base_link -> camera_color_optical_frame (aruco_poses 프레임, tf2_echo 기준)
     ext_trans_base_cam: [0.411, 0.049, 0.398]
