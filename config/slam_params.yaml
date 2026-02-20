@@ -1,64 +1,75 @@
 /**:
   ros__parameters:
     # Topics
-    wheel_odom_topic: "/w_odom"   # graph_optimizer 구독 (wheel_odom_node 발행과 일치)
-    odom_topic: "/w_odom"         # OdomBetweenFactor (wheel odom, base_link)
+    wheel_odom_topic: "/w_odom" # graph_optimizer 구독 (wheel_odom_node 발행과 일치)
+    odom_topic: "/w_odom" # OdomBetweenFactor (wheel odom, base_link)
     aruco_poses_topic: "/aruco_poses"
 
-    base_link_frame: "base_footprint"
+    base_link_frame: "base_link"
     camera_frame: "camera_color_optical_frame"
     odom_frame: "odom"
     map_frame: "map"
 
     # 랜드마크 저장 서비스 저장 위치
-    landmarks_save_path: "/root/ros2_ws/src/aruco_sam_ailab/map/landmarks_map.json"
+    landmarks_save_path: "/ros_ws/src/aruco_sam_ailab/map/landmarks_map.json"
 
     # [모드 설정 - 이 파일에서만 변경]
     # run_mode: "mapping" (맵 생성) | "localization" (위치 추정, 맵 고정)
     run_mode: "localization"
     # map_path: Localization 모드에서 로드할 맵 파일 (landmarks_map.json 형식)
-    map_path: "/home/ubuntu/ros_ws/src/aruco_sam_ailab/map/landmarks_map.json"
+    map_path: "/ros_ws/src/aruco_sam_ailab/map/landmarks_map.json"
 
     # base_link -> camera_color_optical_frame (aruco_poses 프레임, tf2_echo 기준)
     ext_trans_base_cam: [0.411, 0.049, 0.398]
-    ext_rot_base_cam: [0.0, 0.0, 1.0,
-                      -1.0, 0.0, 0.0,
-                       0.0, -1.0, 0.0]
+    ext_rot_base_cam: [0.0, 0.0, 1.0, -1.0, 0.0, 0.0, 0.0, -1.0, 0.0]
 
     ext_trans_base_depth_cam: [0.411, 0.049, 0.398]
-    ext_rot_base_depth_cam: [0.0, 0.0, 1.0,
-                            -1.0, 0.0, 0.0,
-                             0.0, -1.0, 0.0]
+    ext_rot_base_depth_cam: [0.0, 0.0, 1.0, -1.0, 0.0, 0.0, 0.0, -1.0, 0.0]
 
     # wheel_odom_node (joint_states -> wheel_odom, SLAM 연동)
     wheel_radius: 0.165
     track_width: 0.605
-    publish_tf: false
-    sync_with_slam_topic: "/odometry/global"
-    wheel_odom_correction_topic: "/odometry/wheel_odom_correction"  # 최적화마다 wheel odom 보정
+    publish_tf: true
+    sync_with_slam_topic: "/aruco_slam/odom"
+    wheel_odom_correction_topic: "/odometry/wheel_odom_correction" # 최적화마다 wheel odom 보정
 
-    # TF: graph_optimizer는 발행 안 함 (wheel_odom_node에서 odom->base_link 발행)
-    publish_tf: false
+    # TF: graph_optimizer는 발행 안 함 (wheel_odom_node에서 odom->base_footprint 발행)
     # Debug: 최적화 없이 ArUco → base_link 변환 실시간 퍼블리시 (/debug/aruco_markers_map)
     debug_aruco_map: true
 
     # ArUco observation parameters (관측은 camera_color_optical_frame)
-    aruco_trans_noise: 0.02        # meters (작을수록 제약 강함)
-    aruco_rot_noise: 0.05          # radians (작을수록 제약 강함)
+    aruco_trans_noise: 0.02 # meters (작을수록 제약 강함)
+    aruco_rot_noise: 0.05 # radians (작을수록 제약 강함)
 
     # ZUPT (Zero Motion Update): 정지 시 ArUco 관측 무시 → 카메라 노이즈로 인한 진동 방지
-    zupt_trans_thresh: 0.01   # meters (1cm 미만 이동이면 정지로 간주)
-    zupt_rot_thresh: 0.008   # radians (약 0.5도 미만 회전이면 정지로 간주)
+    zupt_trans_thresh: 0.01 # meters (1cm 미만 이동이면 정지로 간주)
+    zupt_rot_thresh: 0.008 # radians (약 0.5도 미만 회전이면 정지로 간주)
 
     # Keyframe policy: 아래 조건 중 하나라도 만족하면 키프레임 추가 (OR)
     # - 첫 키프레임: 항상 첫 프레임은 키프레임
     # - 시간 간격: keyframe_time_interval 이상 경과 시 키프레임 (최적화도 이때 수행)
     # - 움직임: 거리 ≥ keyframe_distance_threshold 또는 회전 ≥ keyframe_angle_threshold
     # - 마커 등장/퇴장
-    keyframe_time_interval: 2.0     # seconds (약 2초마다 키프레임·최적화)
-    keyframe_distance_threshold: 0.5 # meters (50cm)
-    keyframe_angle_threshold: 0.0524 # radians (약 3도)
+    keyframe_time_interval: 3.0 # seconds (성능 최적화: 2초 → 3초)
+    keyframe_distance_threshold: 0.5 # meters
+    keyframe_angle_threshold: 0.1 # radians (약 6도)
 
     # ISAM2 parameters
     isam_relinearize_threshold: 0.1
-    isam_relinearize_skip: 1
+    isam_relinearize_skip: 10 # 성능 최적화: 1 → 10
+
+    # ─── SLAM 보정 안정성 (Fix 18) ────────────────────────────────────────────────
+    # wheel_odom_node가 수신한 SLAM 보정이 한계를 초과하면 거부 (날아다님 방지)
+    max_correction_dist: 1.0 # m      — SLAM 한 보정에서 허용할 최대 위치 변화량
+    max_correction_yaw: 0.5 # rad    — SLAM 한 보정에서 허용할 최대 방향 변화량
+
+    # graph_optimizer TF 보정 스무딩 (날아다님 2차 방어)
+    tf_smooth_alpha: 0.3 # —      — 0.0(최대 스무딩) ~ 1.0(즉시 적용)
+
+    # ─── wheel_odom_node stability (Fix 20) ──────────────────────────────────────
+    lpf_alpha: 0.3 # 0.1(강한 필터) ~ 1.0(필터 없음). 시뮬레이션 지터 제거용.
+    deadband: 0.001 # m/s. 이 값 미만의 속도는 0으로 처리.
+
+    # ─── ego_state 가속도 계산 (Fix 14) ──────────────────────────────────────────
+    ego_state_accel_clamp: 3.0 # m/s^2 — finite difference 가속도 클램핑 한계
+

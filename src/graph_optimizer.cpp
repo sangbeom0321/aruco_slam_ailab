@@ -46,10 +46,15 @@ public:
     rclcpp::Time lastKeyframeTime_{0};   // 마지막 키프레임 시간 (0 = 미초기화)
     std::set<int> lastVisibleMarkers_;    // 마지막에 보였던 마커 ID들
 
-    // Keyframe 파라미터 (튜닝 가능)
-    static constexpr double keyframeDistThresh_ = 0.3;   // 30cm
-    static constexpr double keyframeAngleThresh_ = 0.2; // 약 11.5도 (rad)
-    static constexpr double keyframeTimeThresh_ = 2.0;   // 2초 (Keep Alive)
+    // Keyframe Selection Thresholds (Fix 19)
+    double keyframeDistThresh_;
+    double keyframeAngleThresh_;
+    double keyframeTimeThresh_;
+
+    // TF Smoothing (Fix 18)
+    double tfSmoothAlpha_;
+    gtsam::Pose3 lastPublishedTF_;
+    bool tfInitialized_ = false;
 
     // ZUPT 파라미터 (정지 판단 임계값)
     double zuptTransThresh_ = 0.01;   // 1cm
@@ -117,6 +122,16 @@ public:
             std::bind(&GraphOptimizer::saveLandmarksCallback, this,
                       std::placeholders::_1, std::placeholders::_2));
 
+    // Fix 19: Keyframe Threshold Parameterization
+    // Thresholds are already declared in ParamServer constructor, just get values
+    get_parameter("keyframe_distance_threshold", keyframeDistThresh_);
+    get_parameter("keyframe_angle_threshold", keyframeAngleThresh_);
+    get_parameter("keyframe_time_interval", keyframeTimeThresh_);
+
+    // Fix 18: TF Smoothing
+    tfSmoothAlpha_ = declare_parameter("tf_smooth_alpha", 0.3);
+
+    RCLCPP_INFO(get_logger(), "GraphOptimizer Initialized (v5b: Param fixes applied).");
         // 2.6. Run Mode (mapping vs localization)
         declare_parameter("run_mode", "mapping");
         declare_parameter("map_path", "landmarks_map.json");
@@ -191,7 +206,9 @@ public:
         // 2. 오도메트리 동기화 (가장 가까운 시간의 휠 오도메트리 찾기)
         nav_msgs::msg::Odometry currOdom;
         if (!getSyncedOdom(msg->header.stamp, currOdom)) {
-            RCLCPP_WARN(get_logger(), "Waiting for Wheel Odometry...");
+            RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+                         "wheel_odom 동기화 대기 중 (queue=%zu개, ArUco_stamp=%.3fs)",
+                         odomQueue_.size(), rclcpp::Time(msg->header.stamp).seconds());
             return;
         }
         gtsam::Pose3 currOdomPose = poseMsgToGtsam(currOdom.pose.pose);
@@ -283,10 +300,10 @@ public:
 
         // 3. 이동량 체크 (Odom 기준)
         gtsam::Pose3 delta = lastKeyframeOdomPose_.between(currOdomPose);
-        if (delta.translation().norm() > keyframeDistThresh_) return true;  // 거리 30cm
+        if (delta.translation().norm() > keyframeDistThresh_) return true;
         // 회전 각도 (axisAngle: axis, angle)
         double rotAngle = std::abs(delta.rotation().axisAngle().second);
-        if (rotAngle > keyframeAngleThresh_) return true;  // 약 11.5도
+        if (rotAngle > keyframeAngleThresh_) return true;
 
         // 4. 마커 구성 변경 체크 (새로운 마커 등장 시)
         for (int id : currMarkerIds) {
@@ -393,25 +410,54 @@ public:
         pubWheelOdomCorrection_->publish(correctionMsg);
     }
 
-    void publishMapToOdomTF(const gtsam::Pose3& mapToBase, const gtsam::Pose3& odomToBase, const rclcpp::Time& stamp) {
-        // REP-105: map->odom 발행 (제어는 odom->base만 사용 → SLAM 튐에 영향 없음)
-        // map_to_base = map_to_odom * odom_to_base  =>  map_to_odom = map_to_base * odom_to_base.inverse()
-        gtsam::Pose3 mapToOdom = mapToBase.compose(odomToBase.inverse());
+    void publishMapToOdomTF(const gtsam::Pose3& map_to_base, const gtsam::Pose3& odom_to_base,
+                          const rclcpp::Time& stamp) {
+    // REP-105: map->odom = map->base * (odom->base)^-1
+    gtsam::Pose3 mapToOdomRaw = map_to_base.compose(odom_to_base.inverse());
 
-        geometry_msgs::msg::TransformStamped t;
-        t.header.stamp = stamp;
-        t.header.frame_id = mapFrame;
-        t.child_frame_id = odomFrame;
-        t.transform.translation.x = mapToOdom.translation().x();
-        t.transform.translation.y = mapToOdom.translation().y();
-        t.transform.translation.z = mapToOdom.translation().z();
-        auto q = mapToOdom.rotation().toQuaternion();
-        t.transform.rotation.w = q.w();
-        t.transform.rotation.x = q.x();
-        t.transform.rotation.y = q.y();
-        t.transform.rotation.z = q.z();
-        tfBroadcaster_->sendTransform(t);
-    }
+    // Fix 18: TF Smoothing
+    gtsam::Pose3 mapToOdom = tfInitialized_ ? smoothPose(lastPublishedTF_, mapToOdomRaw) : mapToOdomRaw;
+
+    lastPublishedTF_ = mapToOdom;
+    tfInitialized_ = true;
+
+    geometry_msgs::msg::TransformStamped t;
+    t.header.stamp = stamp;
+    t.header.frame_id = mapFrame;
+    t.child_frame_id = odomFrame;
+
+    // Fix: Force 2D Plane (Map->Odom should have Z=0, Roll=0, Pitch=0)
+    t.transform.translation.x = mapToOdom.translation().x();
+    t.transform.translation.y = mapToOdom.translation().y();
+    t.transform.translation.z = 0.0; // Force Z to 0
+
+    // Force Roll and Pitch to 0 (Use only Yaw)
+    double yaw = mapToOdom.rotation().yaw();
+    tf2::Quaternion q_tf;
+    q_tf.setRPY(0, 0, yaw);
+    t.transform.rotation = tf2::toMsg(q_tf);
+
+    tfBroadcaster_->sendTransform(t);
+  }
+
+  gtsam::Pose3 smoothPose(const gtsam::Pose3& prev, const gtsam::Pose3& curr) const {
+    const double dist = (curr.translation() - prev.translation()).norm();
+    const double alpha = (dist < 0.05) ? 1.0 : tfSmoothAlpha_;
+
+    const auto t = prev.translation() + alpha * (curr.translation() - prev.translation());
+
+    // Rotation smoothing (2D yaw focus)
+    const double yawPrev = prev.rotation().yaw();
+    const double yawCurr = curr.rotation().yaw();
+    double yawDiff = yawCurr - yawPrev;
+    while (yawDiff > M_PI) yawDiff -= 2.0 * M_PI;
+    while (yawDiff < -M_PI) yawDiff += 2.0 * M_PI;
+
+    const double yaw = yawPrev + alpha * yawDiff;
+
+    return gtsam::Pose3(gtsam::Rot3::Rz(yaw), t);
+  }
+
 
     void publishTFOnly(const gtsam::Pose3& estimatedPose, const rclcpp::Time& stamp,
                       const gtsam::Pose3& odomToBase) {
@@ -475,14 +521,27 @@ public:
     bool getSyncedOdom(const rclcpp::Time& stamp, nav_msgs::msg::Odometry& result) {
         if (odomQueue_.empty()) return false;
 
-        // 간단하게 가장 최신 것 사용 (실제로는 보간이나 근사 검색 필요)
-        // 여기서는 예시로 가장 뒤에 있는(최신) 데이터를 씀
-        result = odomQueue_.back();
+        // 가장 가까운 시간의 odom 탐색 (back()만 쓰면 최신 데이터가 오래된 마커 타임스탬프와 불일치)
+        double minDiff = std::numeric_limits<double>::max();
+        size_t bestIdx = 0;
+        for (size_t i = 0; i < odomQueue_.size(); ++i) {
+            double diff = std::abs((rclcpp::Time(odomQueue_[i].header.stamp) - stamp).seconds());
+            if (diff < minDiff) {
+                minDiff = diff;
+                bestIdx = i;
+            }
+        }
 
-        // 시간 차이가 너무 크면 무시 (0.5초 이상)
-        double diff = std::abs((rclcpp::Time(result.header.stamp) - stamp).seconds());
-        if (diff > 0.5) return false;
+        // Gazebo 초기화 지연 대비: 2.0초까지 허용 (기존 0.5초에서 완화)
+        if (minDiff > 2.0) {
+            RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
+                "Wheel odom time gap too large: %.3fs (ArUco: %.3f, Odom: %.3f)",
+                minDiff, stamp.seconds(),
+                rclcpp::Time(odomQueue_[bestIdx].header.stamp).seconds());
+            return false;
+        }
 
+        result = odomQueue_[bestIdx];
         return true;
     }
 
