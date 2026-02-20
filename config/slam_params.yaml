@@ -1,8 +1,8 @@
 /**:
   ros__parameters:
     # Topics
-    wheel_odom_topic: "/odometry/imu_incremental"   # IMU odom (imu_preintegration 발행)
-    odom_topic: "/odometry/imu_incremental"
+    wheel_odom_topic: "/w_odom"                      # Wheel odometry (optional, 나중에 연결)
+    odom_topic: "/odometry/imu_incremental"          # IMU odom (imu_preintegration 발행)
     aruco_poses_topic: "/aruco_poses"
     imu_topic: "/camera/camera/imu"
 
@@ -37,15 +37,20 @@
                       -1.0, 0.0, 0.0,
                        0.0, -1.0, 0.0]
 
-    # IMU noise parameters (RealSense D455)
-    imu_acc_noise: 0.01
-    imu_gyr_noise: 0.001
-    imu_acc_bias_n: 0.0001
-    imu_gyr_bias_n: 0.00001
+    # IMU noise parameters (RealSense D455 / Bosch BMI055 datasheet)
+    imu_acc_noise: 0.0015        # acc noise density: 150μg/√Hz = 0.0015 m/s²/√Hz
+    imu_gyr_noise: 0.00024       # gyr noise density: 0.014°/s/√Hz = 0.00024 rad/s/√Hz
+    imu_acc_bias_n: 0.0004       # acc bias instability: 40μg ≈ 3.9e-4 m/s²
+    imu_gyr_bias_n: 0.00001      # gyr bias instability: 2°/hr ≈ 9.7e-6 rad/s
     imu_gravity: 9.81
 
     # IMU flag
     use_imu: true
+
+    # Wheel odometry (optional, 나중에 /w_odom 토픽 연결 시 활성화)
+    use_wheel_odom: false
+    wheel_odom_trans_noise: 0.1
+    wheel_odom_rot_noise: 0.1
 
     # ArUco observation parameters (10.5cm 마커 기준)
     aruco_trans_noise: 0.10
@@ -59,6 +64,14 @@
     # ISAM2 parameters
     isam_relinearize_threshold: 0.1
     isam_relinearize_skip: 1
+
+    # EKF Smoother: IMU odom + SLAM correction fusion
+    # Process noise (σ per √s): how much IMU odom drifts
+    ekf_process_noise_pos: 0.1    # position drift σ (m/√s) — 낮을수록 IMU 신뢰 ↑
+    ekf_process_noise_rot: 0.05    # rotation drift σ (rad/√s)
+    # Measurement noise (σ): SLAM correction accuracy — 높을수록 부드러움 ↑
+    ekf_measurement_noise_pos: 0.05   # SLAM position σ (m)
+    ekf_measurement_noise_rot: 0.10   # SLAM rotation σ (rad)
 
     # Debug
     enable_topic_debug_log: true

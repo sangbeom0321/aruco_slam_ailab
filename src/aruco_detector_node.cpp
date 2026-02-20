@@ -13,6 +13,7 @@
 #include <opencv2/calib3d.hpp>
 #include <memory>
 #include <vector>
+#include <set>
 #include <map>
 #include <cmath>
 #include <mutex>
@@ -32,6 +33,7 @@ public:
         declare_parameter("use_depth_correction", true);
         declare_parameter("depth_max_range", 5.0);
         declare_parameter("depth_sample_radius", 3);
+        declare_parameter("allowed_marker_ids", std::vector<long>{});
 
         std::string camera_topic = get_parameter("camera_topic").as_string();
         std::string camera_info_topic = get_parameter("camera_info_topic").as_string();
@@ -43,6 +45,14 @@ public:
         use_depth_correction_ = get_parameter("use_depth_correction").as_bool();
         depth_max_range_ = get_parameter("depth_max_range").as_double();
         depth_sample_radius_ = get_parameter("depth_sample_radius").as_int();
+
+        auto id_list = get_parameter("allowed_marker_ids").as_integer_array();
+        for (auto id : id_list) allowed_marker_ids_.insert(static_cast<int>(id));
+        if (!allowed_marker_ids_.empty()) {
+            std::string ids_str;
+            for (int id : allowed_marker_ids_) ids_str += std::to_string(id) + " ";
+            RCLCPP_INFO(get_logger(), "ArUco ID filter: only [%s]", ids_str.c_str());
+        }
 
         // Initialize ArUco dictionary
         initArucoDictionary(aruco_dict_type);
@@ -262,6 +272,12 @@ private:
                     cv::Vec3d rvec = rvecs[idx];
                     cv::Vec3d tvec = tvecs[idx];
                     int marker_id = ids[idx];
+
+                    // ID filter: only allow specified marker IDs
+                    if (!allowed_marker_ids_.empty() &&
+                        allowed_marker_ids_.find(marker_id) == allowed_marker_ids_.end()) {
+                        continue;
+                    }
 
                     double pos_x = tvec[0], pos_y = tvec[1], pos_z = tvec[2];
 
@@ -513,6 +529,7 @@ private:
 
     double marker_size_;
     int vis_marker_id_counter_ = 0;  // 3D 시각화 마커 누적용 고유 ID
+    std::set<int> allowed_marker_ids_;  // empty = allow all
 
     bool use_depth_correction_ = true;
     double depth_max_range_ = 5.0;

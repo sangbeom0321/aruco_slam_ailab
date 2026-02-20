@@ -187,12 +187,36 @@ target_link_libraries(aruco_detector_node
   "${cpp_typesupport_target3}"
 )
 
+# ekf_smoother executable
+add_executable(ekf_smoother src/ekf_smoother.cpp)
+ament_target_dependencies(ekf_smoother
+  rclcpp
+  sensor_msgs
+  nav_msgs
+  geometry_msgs
+  std_msgs
+  tf2
+  tf2_ros
+  tf2_geometry_msgs
+)
+if(TARGET GTSAM::gtsam)
+  target_link_libraries(ekf_smoother GTSAM::gtsam)
+elseif(TARGET gtsam)
+  target_link_libraries(ekf_smoother gtsam)
+else()
+  target_link_libraries(ekf_smoother ${GTSAM_LIBRARIES})
+endif()
+rosidl_get_typesupport_target(cpp_typesupport_target4
+  ${PROJECT_NAME} "rosidl_typesupport_cpp")
+target_link_libraries(ekf_smoother "${cpp_typesupport_target4}")
+
 # Install executables
 install(TARGETS
   imu_preintegration
   graph_optimizer
   aruco_detector_node
   wheel_odom_node
+  ekf_smoother
   DESTINATION lib/${PROJECT_NAME}
 )
 

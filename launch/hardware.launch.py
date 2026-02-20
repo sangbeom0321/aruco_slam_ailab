@@ -76,6 +76,15 @@ def generate_launch_description():
         output='screen',
     )
 
+    # EKF Smoother (IMU odom + SLAM correction → smooth odometry)
+    ekf_smoother = Node(
+        package='aruco_sam_ailab',
+        executable='ekf_smoother',
+        name='ekf_smoother',
+        parameters=[config_file, {'use_sim_time': True}],
+        output='screen',
+    )
+
     # RViz2
     rviz_config = join(pkg_share_aruco, 'config', 'slam_rviz.rviz')
     rviz2 = Node(
@@ -92,5 +101,6 @@ def generate_launch_description():
         aruco_detector,
         imu_preintegration,
         graph_optimizer,
+        ekf_smoother,
         rviz2,
     ])
