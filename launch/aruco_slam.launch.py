@@ -121,12 +121,14 @@ def generate_launch_description():
         executable='landmark_boundary_occupancy_grid_node.py',
         name='landmark_boundary_occupancy_grid_node',
         output='screen',
+        respawn=True,           # 추가: 죽으면 자동 부활
+        respawn_delay=2.0,      # 추가: 부활 간격 2초
         parameters=[
             {'use_sim_time': use_sim_time},
             {'map_path': map_path_from_config},
             {'frame_id': 'map'},
-            {'resolution': 0.1},
-            {'wall_thickness': 2},
+            {'resolution': 0.05},
+            {'wall_thickness': 1},
             {'publish_rate': 1.0},
         ],
     )
@@ -147,6 +149,8 @@ def generate_launch_description():
         executable='ego_state_publisher.py',
         name='ego_state_publisher',
         output='screen',
+        respawn=True,           # 추가: 죽으면 자동 부활
+        respawn_delay=2.0,      # 추가: 부활 간격 2초
         parameters=[{'use_sim_time': use_sim_time}],
     )
 

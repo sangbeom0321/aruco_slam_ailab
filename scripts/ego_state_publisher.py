@@ -64,6 +64,13 @@ class EgoStatePublisher(Node):
         stamp = Time.from_msg(msg.header.stamp)
         yaw = quaternion_to_yaw(msg.pose.pose.orientation)
 
+        # [추가] 시간 역행 감지
+        if self._prev_stamp is not None and stamp.nanoseconds < self._prev_stamp.nanoseconds:
+            self.get_logger().warn('Time jump detected in EgoState! Resetting.')
+            self._prev_v = 0.0
+            self._prev_stamp = stamp
+            
+            
         # EgoState 발행 — SLAM 최종 출력 (차량 전체 상태)
         ego = EgoState()
         ego.header.stamp = msg.header.stamp
@@ -110,7 +117,8 @@ def main(args=None):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():          # 추가: rclpy가 아직 켜져 있을 때만 끕니다.
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

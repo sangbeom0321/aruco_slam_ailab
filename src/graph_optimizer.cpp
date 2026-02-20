@@ -64,6 +64,17 @@ public:
     std::deque<nav_msgs::msg::Odometry> odomQueue_;
     std::map<int, gtsam::Key> landmarkIdToKey_; // MarkerID -> GTSAM Key(L)
 
+    // ============================================
+    // [추가] 3D 포즈를 2D 평면(Z=0, Roll=0, Pitch=0)으로 강제 투영
+    // ============================================
+    gtsam::Pose3 flattenPose(const gtsam::Pose3& pose) const {
+        double yaw = pose.rotation().yaw();
+        double x = pose.translation().x();
+        double y = pose.translation().y();
+        return gtsam::Pose3(gtsam::Rot3::Rz(yaw), gtsam::Point3(x, y, 0.0));
+    }
+
+
     // ROS Interface
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr subWheelOdom_;
     rclcpp::Subscription<aruco_sam_ailab::msg::MarkerArray>::SharedPtr subAruco_;
@@ -186,6 +197,45 @@ public:
     // 메인 콜백: ArUco 데이터가 들어오면 SLAM 수행
     void arucoHandler(const aruco_sam_ailab::msg::MarkerArray::SharedPtr msg) {
         std::lock_guard<std::mutex> lock(mtx_);
+
+        // === [추가] 시간 역행(Time Jump) 감지 및 ISAM2 완전 리셋 로직 ===
+        static double last_msg_sec = 0.0;
+        double current_sec = msg->header.stamp.sec + msg->header.stamp.nanosec * 1e-9;
+        
+        if (last_msg_sec > 0.0 && current_sec < last_msg_sec) {
+            RCLCPP_WARN(get_logger(), "\033[1;31mTime jump detected in SLAM! Initiating Total Reset.\033[0m");
+
+            // 1. GTSAM ISAM2 최적화기 완전 파괴 및 재생성
+            gtsam::ISAM2Params params;
+            params.relinearizeThreshold = 0.1;
+            params.relinearizeSkip = 1;
+            isam_ = gtsam::ISAM2(params);
+
+            // 2. 그래프와 변수 모두 삭제
+            graphFactors_.resize(0);
+            graphValues_.clear();
+
+            // 3. 큐와 마커 기록 초기화
+            odomQueue_.clear();
+            lastVisibleMarkers_.clear();
+
+            // 4. 상태 플래그 초기화
+            systemInitialized_ = false;
+            tfInitialized_ = false;
+            frameIdx_ = 0;
+
+            // 5. Localization 모드라면 고정된 랜드마크 맵을 다시 불러옴
+            if (isLocalizationMode_) {
+                loadMap(mapPath_);
+            }
+            // [추가] TF 트리가 끊어지는 것을 방지하기 위해 원점 TF를 즉시 발행
+            publishMapToOdomTF(gtsam::Pose3(), gtsam::Pose3(), msg->header.stamp);
+            lastPublishedTF_ = gtsam::Pose3(); // TF 스무딩 변수도 리셋
+
+            last_msg_sec = current_sec;
+            return; // 꼬여버린 이번 프레임은 버리고 탈출
+        }
+        last_msg_sec = current_sec;
 
         // [중요] 1. 들어온 마커 데이터를 즉시 "로봇 좌표계(base_link)"로 변환
         // 이후 모든 로직은 Camera 좌표계를 신경 쓰지 않음.
@@ -318,6 +368,7 @@ public:
         return false;
     }
 
+
     void initializeSystem(const aruco_sam_ailab::msg::MarkerArray& markers, const nav_msgs::msg::Odometry& odom) {
         initializeSystemAt(gtsam::Pose3(), odom);
         lastVisibleMarkers_.clear();
@@ -330,9 +381,11 @@ public:
     }
 
     void initializeSystemAt(const gtsam::Pose3& startPose, const nav_msgs::msg::Odometry& odom) {
-        currentEstimate_ = startPose;
+        // [수정] 들어온 시작 위치를 2D로 투영한 뒤 저장
+        currentEstimate_ = flattenPose(startPose);
         lastOdomPose_ = poseMsgToGtsam(odom.pose.pose);
         lastKeyframeOdomPose_ = lastOdomPose_;
+        ///////////////////////////////////////////////
         lastKeyframeTime_ = odom.header.stamp;
         lastVisibleMarkers_.clear();
 
@@ -382,6 +435,10 @@ public:
             gtsam::Values result = isam_.calculateEstimate();
             currentEstimate_ = result.at<gtsam::Pose3>(X(frameIdx_));
 
+            // [추가] 최적화된 3D 추정치를 강제로 지면(2D)으로 끌어내림
+            currentEstimate_ = flattenPose(currentEstimate_);
+
+
             // 시각화, TF(map->odom) 발행 및 Wheel Odom 보정 신호 송출
             publishResults(stamp, currOdomPose);
             publishCorrection(currentEstimate_, stamp);
@@ -415,6 +472,10 @@ public:
     // REP-105: map->odom = map->base * (odom->base)^-1
     gtsam::Pose3 mapToOdomRaw = map_to_base.compose(odom_to_base.inverse());
 
+    // [추가] TF 트리 연산 결과도 무조건 2D로 고정
+        mapToOdomRaw = flattenPose(mapToOdomRaw);
+
+
     // Fix 18: TF Smoothing
     gtsam::Pose3 mapToOdom = tfInitialized_ ? smoothPose(lastPublishedTF_, mapToOdomRaw) : mapToOdomRaw;
 
@@ -425,26 +486,27 @@ public:
     t.header.stamp = stamp;
     t.header.frame_id = mapFrame;
     t.child_frame_id = odomFrame;
-
-    // Fix: Force 2D Plane (Map->Odom should have Z=0, Roll=0, Pitch=0)
     t.transform.translation.x = mapToOdom.translation().x();
     t.transform.translation.y = mapToOdom.translation().y();
-    t.transform.translation.z = 0.0; // Force Z to 0
-
-    // Force Roll and Pitch to 0 (Use only Yaw)
-    double yaw = mapToOdom.rotation().yaw();
-    tf2::Quaternion q_tf;
-    q_tf.setRPY(0, 0, yaw);
-    t.transform.rotation = tf2::toMsg(q_tf);
+    t.transform.translation.z = mapToOdom.translation().z();
+    gtsam::Quaternion q = mapToOdom.rotation().toQuaternion();
+    t.transform.rotation.x = q.x();
+    t.transform.rotation.y = q.y();
+    t.transform.rotation.z = q.z();
+    t.transform.rotation.w = q.w();
 
     tfBroadcaster_->sendTransform(t);
   }
 
-  gtsam::Pose3 smoothPose(const gtsam::Pose3& prev, const gtsam::Pose3& curr) const {
+    gtsam::Pose3 smoothPose(const gtsam::Pose3& prev, const gtsam::Pose3& curr) const {
     const double dist = (curr.translation() - prev.translation()).norm();
     const double alpha = (dist < 0.05) ? 1.0 : tfSmoothAlpha_;
 
-    const auto t = prev.translation() + alpha * (curr.translation() - prev.translation());
+    // 1. auto 대신 명시적으로 gtsam::Point3 타입으로 연산 결과를 받습니다.
+    gtsam::Point3 t_raw = prev.translation() + alpha * (curr.translation() - prev.translation());
+
+    // 2. Z축이 들썩이지 않도록 강제 평탄화한 새로운 변수 t_flat을 만듭니다.
+    gtsam::Point3 t_flat(t_raw.x(), t_raw.y(), 0.0);
 
     // Rotation smoothing (2D yaw focus)
     const double yawPrev = prev.rotation().yaw();
@@ -455,13 +517,21 @@ public:
 
     const double yaw = yawPrev + alpha * yawDiff;
 
-    return gtsam::Pose3(gtsam::Rot3::Rz(yaw), t);
+    // 3. 최종 반환 시 평탄화된 t_flat을 사용합니다.
+    return gtsam::Pose3(gtsam::Rot3::Rz(yaw), t_flat);
   }
 
 
     void publishTFOnly(const gtsam::Pose3& estimatedPose, const rclcpp::Time& stamp,
                       const gtsam::Pose3& odomToBase) {
         publishMapToOdomTF(estimatedPose, odomToBase, stamp);
+
+        // [추가] 추정된 위치를 발행하기 전에 2D로 깎아냄
+        gtsam::Pose3 flatEstimatedPose = flattenPose(estimatedPose);
+
+        publishMapToOdomTF(flatEstimatedPose, odomToBase, stamp);
+
+
 
         // Path (부드러운 시각화용)
         geometry_msgs::msg::PoseStamped p;

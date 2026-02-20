@@ -394,7 +394,8 @@ def main(args=None):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():          # 추가: rclpy가 아직 켜져 있을 때만 끕니다.
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

@@ -61,8 +61,8 @@ public:
     std::string correction_topic = get_parameter("wheel_odom_correction_topic").as_string();
     std::string sync_topic = get_parameter("sync_with_slam_topic").as_string();
 
-    declare_parameter("max_correction_dist", 1.0);
-    declare_parameter("max_correction_yaw", 0.5);
+    declare_parameter("max_correction_dist", 10.0);
+    declare_parameter("max_correction_yaw", 3.15);
     max_correction_dist_ = get_parameter("max_correction_dist").as_double();
     max_correction_yaw_ = get_parameter("max_correction_yaw").as_double();
 
@@ -107,6 +107,23 @@ private:
   void jointStatesCallback(const sensor_msgs::msg::JointState::SharedPtr msg) {
     rclcpp::Time now = msg->header.stamp;
     if (now.seconds() == 0.0) now = get_clock()->now();
+
+  // === [추가] 시간 역행(Time Jump) 감지 및 리셋 로직 ===
+    if (last_time_initialized_ && now.seconds() < last_time_.seconds()) {
+      RCLCPP_WARN(get_logger(), "\033[1;33mTime jump detected! Resetting Wheel Odometry state...\033[0m");
+      
+      history_buffer_.clear();      // 과거 궤적 삭제
+      current_pose_x_ = 0.0;        // 위치 강제 초기화
+      current_pose_y_ = 0.0;
+      current_pose_yaw_ = 0.0;
+      v_linear_filt_ = 0.0;         // 필터 속도 초기화
+      omega_filt_ = 0.0;
+      
+      // [추가] 리셋 직후 0.0 상태를 즉시 퍼블리시해서 제어기 측의 대기를 방지
+      last_time_ = now;
+      publishOdometry(now, 0.0, 0.0);
+      return; 
+    }
 
     // 조인트 속도 추출
     double v_l = 0.0, v_r = 0.0;
