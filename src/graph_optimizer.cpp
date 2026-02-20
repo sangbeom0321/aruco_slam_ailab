@@ -381,16 +381,18 @@ public:
     }
 
     void initializeSystemAt(const gtsam::Pose3& startPose, const nav_msgs::msg::Odometry& odom) {
-        // [수정] 들어온 시작 위치를 2D로 투영한 뒤 저장
-        currentEstimate_ = flattenPose(startPose);
+        // [수정] 들어온 시작 위치를 무조건 2D로 먼저 완벽하게 투영
+        gtsam::Pose3 flatStartPose = flattenPose(startPose);
+        
+        currentEstimate_ = flatStartPose;
         lastOdomPose_ = poseMsgToGtsam(odom.pose.pose);
         lastKeyframeOdomPose_ = lastOdomPose_;
-        ///////////////////////////////////////////////
         lastKeyframeTime_ = odom.header.stamp;
         lastVisibleMarkers_.clear();
 
-        graphValues_.insert(X(0), startPose);
-        graphFactors_.add(gtsam::PriorFactor<gtsam::Pose3>(X(0), startPose, priorNoise_));
+        // [수정] 원본 startPose 대신 평탄화된 flatStartPose를 그래프에 삽입
+        graphValues_.insert(X(0), flatStartPose);
+        graphFactors_.add(gtsam::PriorFactor<gtsam::Pose3>(X(0), flatStartPose, priorNoise_));
 
         systemInitialized_ = true;
         frameIdx_ = 0;
@@ -398,8 +400,8 @@ public:
         publishMapToOdomTF(currentEstimate_, lastOdomPose_, odom.header.stamp);
         publishCorrection(currentEstimate_, odom.header.stamp);
 
-        RCLCPP_INFO(get_logger(), "System Initialized at pose (%.2f, %.2f, %.2f)",
-                    startPose.translation().x(), startPose.translation().y(), startPose.translation().z());
+        RCLCPP_INFO(get_logger(), "System Initialized at flat pose (%.2f, %.2f, 0.0)",
+                    flatStartPose.translation().x(), flatStartPose.translation().y());
     }
 
     void processKeyframe(const aruco_sam_ailab::msg::MarkerArray& markers,
