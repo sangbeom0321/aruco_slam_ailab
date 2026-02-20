@@ -22,6 +22,7 @@ public:
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr subImu_;
     rclcpp::Subscription<aruco_sam_ailab::msg::OptimizedKeyframeState>::SharedPtr subOptimizedKeyframeState_;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubImuOdometry_;
+    std::unique_ptr<tf2_ros::TransformBroadcaster> tfBroadcaster_;
 
     bool systemInitialized_ = false;
 
@@ -43,6 +44,13 @@ public:
     double lastImuTime_ = -1.0;
     int keyframeIdx_ = 0;
 
+    // Stationary detection for velocity reset (accelerometer-based)
+    std::deque<double> recentAccNorm_;
+    static constexpr size_t ACC_WINDOW = 100;            // 0.5s at 200Hz (faster response)
+    static constexpr double ACC_STATIONARY_THRESH = 0.15; // m/s² std-dev (lower = more sensitive)
+    static constexpr double VELOCITY_MAX = 1.0;           // max reasonable velocity m/s
+    static constexpr double VELOCITY_DECAY = 0.995;       // per-step decay: 0.995^200 ≈ 0.37 after 1s
+
     // Logging: topic receive check
     uint64_t imuCallbackCount_ = 0;
     bool imuFirstReceivedLogged_ = false;
@@ -63,7 +71,7 @@ public:
 
     IMUPreintegration(const rclcpp::NodeOptions& options) : ParamServer("imu_preintegration", options) {
         subImu_ = create_subscription<sensor_msgs::msg::Imu>(
-            imuTopic, 2000,
+            imuTopic, rclcpp::SensorDataQoS(),
             std::bind(&IMUPreintegration::imuHandler, this, std::placeholders::_1));
 
         subOptimizedKeyframeState_ = create_subscription<aruco_sam_ailab::msg::OptimizedKeyframeState>(
@@ -72,6 +80,7 @@ public:
 
         pubImuOdometry_ = create_publisher<nav_msgs::msg::Odometry>(
             "/odometry/imu_incremental", 2000);
+        tfBroadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
 
         // Setup IMU preintegration parameters
         boost::shared_ptr<gtsam::PreintegrationParams> p = 
@@ -118,8 +127,8 @@ public:
     void initializeSystem(const gtsam::Pose3& initialPose) {
         resetOptimization();
 
-        // Initial pose (in base_link frame, convert to imu frame)
-        gtsam::Pose3 imuPose = initialPose.compose(baseToImu_);
+        // Measurements are already in base_link frame, so track state in base_link
+        gtsam::Pose3 imuPose = initialPose;
         gtsam::Vector3 initialVel(0, 0, 0);
         
         // Compute initial bias from stationary period data
@@ -254,6 +263,13 @@ public:
         double dt = (lastImuTime_ < 0) ? (1.0 / 200.0) : (imuTime - lastImuTime_);
         lastImuTime_ = imuTime;
 
+        // Track acceleration magnitude for stationary detection
+        double accNorm = Eigen::Vector3d(imu_base.linear_acceleration.x,
+                                         imu_base.linear_acceleration.y,
+                                         imu_base.linear_acceleration.z).norm();
+        recentAccNorm_.push_back(accNorm);
+        while (recentAccNorm_.size() > ACC_WINDOW) recentAccNorm_.pop_front();
+
         // Integrate IMU measurement
         imuIntegratorImu_->integrateMeasurement(
             gtsam::Vector3(imu_base.linear_acceleration.x,
@@ -267,14 +283,56 @@ public:
         // Predict state
         gtsam::NavState currentState = imuIntegratorImu_->predict(prevState_, prevBias_);
 
-        // Publish incremental odometry
-        publishOdometry(currentState, imu_base.header.stamp);
+        // Per-step state update (prevents numerical issues with long integrations)
+        prevState_ = currentState;
+        imuIntegratorImu_->resetIntegrationAndSetBias(prevBias_);
+
+        // Velocity damping: exponential decay prevents runaway from accelerometer noise
+        // At 200Hz: 0.995^200 ≈ 0.37 → velocity decays to 37% after 1 second without real acceleration
+        {
+            gtsam::Vector3 vel = prevState_.velocity();
+            vel *= VELOCITY_DECAY;
+            prevState_ = gtsam::NavState(prevState_.pose(), vel);
+        }
+
+        // Stationary detection: if |acc| magnitude is stable (low std-dev), device is not accelerating
+        if (recentAccNorm_.size() >= ACC_WINDOW) {
+            double mean = 0.0;
+            for (double a : recentAccNorm_) mean += a;
+            mean /= recentAccNorm_.size();
+
+            double var = 0.0;
+            for (double a : recentAccNorm_) var += (a - mean) * (a - mean);
+            var /= recentAccNorm_.size();
+            double stddev = std::sqrt(var);
+
+            if (enableTopicDebugLog) {
+                RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000,
+                    "[IMU] acc_stddev=%.4f thresh=%.4f vel=(%.3f,%.3f,%.3f) stationary=%s",
+                    stddev, ACC_STATIONARY_THRESH,
+                    prevState_.velocity().x(), prevState_.velocity().y(), prevState_.velocity().z(),
+                    (stddev < ACC_STATIONARY_THRESH) ? "YES" : "NO");
+            }
+            if (stddev < ACC_STATIONARY_THRESH) {
+                // Device is stationary: zero out velocity
+                prevState_ = gtsam::NavState(prevState_.pose(), gtsam::Vector3::Zero());
+            }
+        }
+
+        // Safety: clamp velocity to prevent runaway
+        gtsam::Vector3 vel = prevState_.velocity();
+        if (vel.norm() > VELOCITY_MAX) {
+            vel = vel.normalized() * VELOCITY_MAX;
+            prevState_ = gtsam::NavState(prevState_.pose(), vel);
+        }
+
+        // Publish incremental odometry (use prevState_ which has corrections applied)
+        publishOdometry(prevState_, imu_base.header.stamp);
     }
 
     void publishOdometry(const gtsam::NavState& state, const rclcpp::Time& stamp) {
-        // Convert from IMU frame to base_link frame
-        gtsam::Pose3 imuPose = state.pose();
-        gtsam::Pose3 basePose = imuPose.compose(baseToImu_.inverse());
+        // State is already tracked in base_link frame (measurements are in base_link)
+        gtsam::Pose3 basePose = state.pose();
 
         nav_msgs::msg::Odometry odom;
         odom.header.stamp = stamp;
@@ -296,6 +354,17 @@ public:
         odom.twist.twist.linear.z = state.velocity().z();
 
         pubImuOdometry_->publish(odom);
+
+        // Broadcast odom → base_link TF
+        geometry_msgs::msg::TransformStamped t;
+        t.header.stamp = stamp;
+        t.header.frame_id = odomFrame;
+        t.child_frame_id = baseLinkFrame;
+        t.transform.translation.x = basePose.translation().x();
+        t.transform.translation.y = basePose.translation().y();
+        t.transform.translation.z = basePose.translation().z();
+        t.transform.rotation = odom.pose.pose.orientation;
+        tfBroadcaster_->sendTransform(t);
     }
 
     // Compute initial bias from stationary period samples
@@ -314,24 +383,28 @@ public:
                                      gyrSum.z() / initGyroSamples_.size());
             
             // Compute accelerometer bias
-            // During stationary period, z-axis should read gravity (9.81 m/s^2)
+            // During stationary period, measured acc = gravity_in_body + bias
+            // Gravity direction is inferred from the mean acceleration vector
             Eigen::Vector3d accSum(0, 0, 0);
             for (const auto& acc : initAccelSamples_) {
                 accSum += acc;
             }
             Eigen::Vector3d accMean = accSum / initAccelSamples_.size();
-            
-            // Expected: z-axis = 9.81 (gravity), x/y = 0 (stationary)
-            // Bias = measured - expected
-            accBias = gtsam::Vector3(accMean.x() - 0.0,      // x bias
-                                    accMean.y() - 0.0,       // y bias
-                                    accMean.z() - imuGravity); // z bias (should be ~9.81)
-            
+
+            // Expected gravity vector: same direction as accMean, magnitude = imuGravity
+            // This handles tilted cameras correctly (doesn't assume Z-up)
+            Eigen::Vector3d gravityInBody = accMean.normalized() * imuGravity;
+            accBias = gtsam::Vector3(accMean.x() - gravityInBody.x(),
+                                    accMean.y() - gravityInBody.y(),
+                                    accMean.z() - gravityInBody.z());
+
             RCLCPP_INFO(get_logger(), "[IMU] Initial bias computed from %zu samples:", initGyroSamples_.size());
-            RCLCPP_INFO(get_logger(), "  Gyro bias: [%.6f, %.6f, %.6f] rad/s", 
+            RCLCPP_INFO(get_logger(), "  Gyro bias: [%.6f, %.6f, %.6f] rad/s",
                        gyrBias.x(), gyrBias.y(), gyrBias.z());
-            RCLCPP_INFO(get_logger(), "  Accel bias: [%.6f, %.6f, %.6f] m/s^2 (z measured: %.3f, expected: %.3f)", 
-                       accBias.x(), accBias.y(), accBias.z(), accMean.z(), imuGravity);
+            RCLCPP_INFO(get_logger(), "  Accel mean: [%.3f, %.3f, %.3f] m/s^2 (norm: %.3f, expected: %.3f)",
+                       accMean.x(), accMean.y(), accMean.z(), accMean.norm(), imuGravity);
+            RCLCPP_INFO(get_logger(), "  Accel bias: [%.6f, %.6f, %.6f] m/s^2",
+                       accBias.x(), accBias.y(), accBias.z());
         } else {
             RCLCPP_WARN(get_logger(), "[IMU] No samples collected, using zero bias");
         }
@@ -399,26 +472,22 @@ public:
     // Graph optimization 결과 수신: 이 포즈/속도/바이어스로 재초기화하고,
     // 그 시점부터 현재까지 쌓인 IMU 데이터를 "재적분(Re-propagation)" 해야 튐/발산 방지
     void optimizedKeyframeStateCallback(const aruco_sam_ailab::msg::OptimizedKeyframeState::SharedPtr msg) {
-        if (msg->bias.size() != 6) {
-            RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
-                "[IMU] Ignored optimized_keyframe_state: bias size %zu (expected 6)", msg->bias.size());
-            return;
-        }
-
         std::lock_guard<std::mutex> lock(mtx_);
 
         double optTime = stamp2Sec(msg->header.stamp);
 
         // 1. 최적화된 상태(Pose, Velocity, Bias) 파싱
         gtsam::Pose3 basePose = poseMsgToGtsam(msg->pose);
-        gtsam::Pose3 imuPose = basePose.compose(baseToImu_);
         gtsam::Vector3 vel(msg->velocity.x, msg->velocity.y, msg->velocity.z);
-        gtsam::imuBias::ConstantBias newBias(
-            (gtsam::Vector(6) << msg->bias[0], msg->bias[1], msg->bias[2],
-                                 msg->bias[3], msg->bias[4], msg->bias[5]).finished());
+
+        // Bias: if provided (size==6), use it; otherwise keep current prevBias_
+        if (msg->bias.size() == 6) {
+            prevBias_ = gtsam::imuBias::ConstantBias(
+                (gtsam::Vector(6) << msg->bias[0], msg->bias[1], msg->bias[2],
+                                     msg->bias[3], msg->bias[4], msg->bias[5]).finished());
+        }
 
         // 2. 큐 정리: 최적화 시점(optTime)보다 오래된 데이터는 삭제
-        //    재적분을 위해 optTime 직후의 데이터부터는 남겨둠
         while (!imuQueue_.empty()) {
             if (stamp2Sec(imuQueue_.front().header.stamp) < optTime) {
                 imuQueue_.pop_front();
@@ -428,10 +497,10 @@ public:
         }
 
         // 3. 상태 리셋: 기준 상태(prevState_)를 최적화된 값으로 덮어씀
-        prevState_ = gtsam::NavState(imuPose, vel);
-        prevBias_ = newBias;
+        //    velocity=0 from graph optimizer → resets accumulated velocity drift
+        prevState_ = gtsam::NavState(basePose, vel);
 
-        // 4. 적분기 리셋: 새로운 바이어스 적용
+        // 4. 적분기 리셋: 현재 바이어스 적용
         imuIntegratorImu_->resetIntegrationAndSetBias(prevBias_);
 
         // 5. [핵심] 재전파 (Re-propagation): t_opt ~ t_now 큐 데이터를 새 바이어스/시작위치로 재적분

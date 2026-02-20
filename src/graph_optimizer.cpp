@@ -1,5 +1,6 @@
 #include "aruco_sam_ailab/utility.hpp"
 #include "aruco_sam_ailab/msg/marker_array.hpp"
+#include "aruco_sam_ailab/msg/optimized_keyframe_state.hpp"
 #include <gtsam/nonlinear/ISAM2.h>
 #include <gtsam/nonlinear/NonlinearFactorGraph.h>
 #include <gtsam/nonlinear/Values.h>
@@ -46,14 +47,11 @@ public:
     rclcpp::Time lastKeyframeTime_{0};   // 마지막 키프레임 시간 (0 = 미초기화)
     std::set<int> lastVisibleMarkers_;    // 마지막에 보였던 마커 ID들
 
-    // Keyframe 파라미터 (튜닝 가능)
-    static constexpr double keyframeDistThresh_ = 0.3;   // 30cm
-    static constexpr double keyframeAngleThresh_ = 0.2; // 약 11.5도 (rad)
-    static constexpr double keyframeTimeThresh_ = 2.0;   // 2초 (Keep Alive)
+    // Keyframe 파라미터 (slam_params.yaml에서 로드)
+    double keyframeDistThresh_;
+    double keyframeAngleThresh_;
+    double keyframeTimeThresh_;
 
-    // ZUPT 파라미터 (정지 판단 임계값)
-    double zuptTransThresh_ = 0.01;   // 1cm
-    double zuptRotThresh_ = 0.008;    // 약 0.5도 (rad)
 
     // Data Buffers & Maps
     std::deque<nav_msgs::msg::Odometry> odomQueue_;
@@ -68,6 +66,7 @@ public:
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubPath_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pubLandmarks_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pubDebugMap_;
+    rclcpp::Publisher<aruco_sam_ailab::msg::OptimizedKeyframeState>::SharedPtr pubOptimizedState_;
 
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr saveLandmarksSrv_;
     std::string landmarksSavePath_;
@@ -107,6 +106,7 @@ public:
         pubPath_ = create_publisher<nav_msgs::msg::Path>("/aruco_slam/path", 10);
         pubLandmarks_ = create_publisher<visualization_msgs::msg::MarkerArray>("/aruco_slam/landmarks", 10);
         pubDebugMap_ = create_publisher<visualization_msgs::msg::MarkerArray>("/aruco_slam/debug_markers", 10);
+        pubOptimizedState_ = create_publisher<aruco_sam_ailab::msg::OptimizedKeyframeState>("/optimized_keyframe_state", 10);
         tfBroadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
 
         // 2.5. Save Landmarks Service
@@ -121,11 +121,6 @@ public:
         declare_parameter("run_mode", "mapping");
         declare_parameter("map_path", "landmarks_map.json");
 
-        // 2.7. ZUPT (Zero Motion Update) 임계값
-        declare_parameter("zupt_trans_thresh", 0.01);
-        declare_parameter("zupt_rot_thresh", 0.008);
-        get_parameter("zupt_trans_thresh", zuptTransThresh_);
-        get_parameter("zupt_rot_thresh", zuptRotThresh_);
         std::string runModeStr;
         get_parameter("run_mode", runModeStr);
         get_parameter("map_path", mapPath_);
@@ -133,10 +128,17 @@ public:
         fixedLandmarkNoise_ = gtsam::noiseModel::Diagonal::Sigmas(
             (gtsam::Vector(6) << 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6).finished());
 
+        // 2.8. Keyframe parameters (from YAML)
+        keyframeDistThresh_ = keyframeDistanceThreshold;
+        keyframeAngleThresh_ = keyframeAngleThreshold;
+        keyframeTimeThresh_ = keyframeTimeInterval;
+        RCLCPP_INFO(get_logger(), "Keyframe policy: dist=%.2fm, angle=%.2frad, time=%.2fs",
+                    keyframeDistThresh_, keyframeAngleThresh_, keyframeTimeThresh_);
+
         // 3. GTSAM Settings
         gtsam::ISAM2Params params;
-        params.relinearizeThreshold = 0.1;
-        params.relinearizeSkip = 1;
+        params.relinearizeThreshold = isamRelinearizeThreshold;
+        params.relinearizeSkip = isamRelinearizeSkip;
         isam_ = gtsam::ISAM2(params);
 
         // 4. Noise Models Setup
@@ -144,18 +146,19 @@ public:
         priorNoise_ = gtsam::noiseModel::Diagonal::Sigmas(
             (gtsam::Vector(6) << 0.001, 0.001, 0.001, 0.001, 0.001, 0.001).finished()); // 시작점 고정
         odomNoise_  = gtsam::noiseModel::Diagonal::Sigmas(
-            (gtsam::Vector(6) << 0.05, 0.05, 0.05, 0.1, 0.1, 0.1).finished()); // 이동 불확실성
+            (gtsam::Vector(6) << 0.1, 0.1, 0.1, 0.1, 0.1, 0.1).finished()); // IMU odom: stationary detection 적용 → 적절한 신뢰
         odomNoiseStationary_ = gtsam::noiseModel::Diagonal::Sigmas(
             (gtsam::Vector(6) << 0.0001, 0.0001, 0.0001, 0.0001, 0.0001, 0.0001).finished()); // 정지 시: 휠 오돔 강하게 신뢰
         obsNoise_   = gtsam::noiseModel::Diagonal::Sigmas(
-            (gtsam::Vector(6) << 0.1, 0.1, 0.1, 0.1, 0.1, 0.1).finished());    // 관측 불확실성 (카메라 노이즈)
+            (gtsam::Vector(6) << arucoRotNoise, arucoRotNoise, arucoRotNoise,
+                                 arucoTransNoise, arucoTransNoise, arucoTransNoise).finished());
         landmarkPriorNoise_ = gtsam::noiseModel::Diagonal::Sigmas(
-             (gtsam::Vector(6) << 10.0, 10.0, 10.0, 10.0, 10.0, 10.0).finished()); // Weak Prior (첫 관측 시 특이점 방지)
+             (gtsam::Vector(6) << 0.5, 0.5, 0.5, 0.3, 0.3, 0.3).finished()); // 첫 관측 기준 중간 강도 (다회 관측으로 수렴)
 
         // 5. Extrinsic Setup (Camera -> Base)
-        // 기존 코드의 extRot, extTrans 값을 그대로 사용
-        gtsam::Rot3 rot(extRotBaseDepthCam);
-        gtsam::Point3 trans(extTransBaseDepthCam.x(), extTransBaseDepthCam.y(), extTransBaseDepthCam.z());
+        // ArUco는 Color 카메라 프레임에서 검출되므로 Color extrinsic 사용
+        gtsam::Rot3 rot(extRotBaseCam);
+        gtsam::Point3 trans(extTransBaseCam.x(), extTransBaseCam.y(), extTransBaseCam.z());
         baseToCam_ = gtsam::Pose3(rot, trans);
 
         // 6. Localization Mode: Load map (fixed landmarks)
@@ -200,18 +203,6 @@ public:
         std::vector<int> currMarkerIds;
         for (const auto& m : markersInBase.markers) currMarkerIds.push_back(m.id);
 
-        // [ZUPT] 3.5. 정지 상태 판단: 오도메트리 변화량이 극히 작으면 ArUco 관측 무시
-        bool isStationary = false;
-        if (systemInitialized_) {
-            gtsam::Pose3 odomDelta = lastKeyframeOdomPose_.between(currOdomPose);
-            double transNorm = odomDelta.translation().norm();
-            double rotAngle = std::abs(odomDelta.rotation().axisAngle().second);
-            // ZUPT: 임계값 미만 움직임이면 정지 상태로 간주
-            if (transNorm < zuptTransThresh_ && rotAngle < zuptRotThresh_) {
-                isStationary = true;
-            }
-        }
-
         // 4. SLAM Process
         if (!systemInitialized_) {
             if (isLocalizationMode_) {
@@ -244,17 +235,14 @@ public:
                     mapIds.empty() ? "(load failed?)" : mapIds.c_str());
                 return;
             } else {
+                if (markersInBase.markers.empty()) {
+                    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+                        "Mapping: Waiting for ArUco markers to initialize...");
+                    return;
+                }
                 initializeSystem(markersInBase, currOdom);
             }
         } else {
-            // [ZUPT] 정지 상태면 ArUco Factor 추가/최적화 생략 → 카메라 노이즈로 인한 진동 방지
-            if (isStationary) {
-                gtsam::Pose3 odomDelta = lastKeyframeOdomPose_.between(currOdomPose);
-                gtsam::Pose3 estimatedPose = currentEstimate_.compose(odomDelta);
-                publishTFOnly(estimatedPose, msg->header.stamp, currOdomPose);
-                return;
-            }
-
             // [핵심] 키프레임인지 판단
             if (needNewKeyframe(currOdomPose, msg->header.stamp, currMarkerIds)) {
                 // Case A: 키프레임 → 그래프 추가 + 최적화
@@ -277,23 +265,22 @@ public:
         // 1. 첫 프레임이면 무조건 True
         if (frameIdx_ == 0) return true;
 
-        // 2. 시간 체크 (너무 빠르면 무조건 Skip - 0.2초 미만은 무시)
+        // 2. 시간 체크 (너무 빠르면 무조건 Skip)
         double timeDiff = (currTime - lastKeyframeTime_).seconds();
-        if (timeDiff < 0.2) return false;
+        bool hasMarkers = !currMarkerIds.empty();
 
-        // 3. 이동량 체크 (Odom 기준)
+        // 마커 보일 때: 0.1초 간격 (~10Hz 최적화), 안 보일 때: 0.2초
+        double minInterval = hasMarkers ? 0.1 : 0.2;
+        if (timeDiff < minInterval) return false;
+
+        // 3. 마커가 보이면 무조건 키프레임 → 최대한 자주 최적화
+        if (hasMarkers) return true;
+
+        // 4. 마커 없을 때: 이동량 기반
         gtsam::Pose3 delta = lastKeyframeOdomPose_.between(currOdomPose);
-        if (delta.translation().norm() > keyframeDistThresh_) return true;  // 거리 30cm
-        // 회전 각도 (axisAngle: axis, angle)
+        if (delta.translation().norm() > keyframeDistThresh_) return true;
         double rotAngle = std::abs(delta.rotation().axisAngle().second);
-        if (rotAngle > keyframeAngleThresh_) return true;  // 약 11.5도
-
-        // 4. 마커 구성 변경 체크 (새로운 마커 등장 시)
-        for (int id : currMarkerIds) {
-            if (lastVisibleMarkers_.find(id) == lastVisibleMarkers_.end()) {
-                return true;  // 못 보던 마커가 나타나면 키프레임 추가!
-            }
-        }
+        if (rotAngle > keyframeAngleThresh_) return true;
 
         // 5. 너무 오래 지났으면 추가 (Keep Alive)
         if (timeDiff > keyframeTimeThresh_) return true;
@@ -368,7 +355,7 @@ public:
             // 시각화, TF(map->odom) 발행 및 Wheel Odom 보정 신호 송출
             publishResults(stamp, currOdomPose);
             publishCorrection(currentEstimate_, stamp);
-
+            publishOptimizedKeyframeState(currentEstimate_, stamp);
         } catch (const std::exception& e) {
             RCLCPP_ERROR(get_logger(), "ISAM2 Update Failed: %s", e.what());
         }
@@ -391,6 +378,20 @@ public:
         correctionMsg.pose.covariance[35] = 0.01;  // yaw
 
         pubWheelOdomCorrection_->publish(correctionMsg);
+    }
+
+    void publishOptimizedKeyframeState(const gtsam::Pose3& optimizedPose, const rclcpp::Time& stamp) {
+        aruco_sam_ailab::msg::OptimizedKeyframeState msg;
+        msg.header.stamp = stamp;
+        msg.header.frame_id = mapFrame;
+        msg.pose = gtsamToPoseMsg(optimizedPose);
+        // Velocity: zero (graph optimizer doesn't track velocity)
+        msg.velocity.x = 0.0;
+        msg.velocity.y = 0.0;
+        msg.velocity.z = 0.0;
+        // Empty bias array signals imu_preintegration to keep its own bias
+        // (bias.size() != 6 → callback will use its own prevBias_)
+        pubOptimizedState_->publish(msg);
     }
 
     void publishMapToOdomTF(const gtsam::Pose3& mapToBase, const gtsam::Pose3& odomToBase, const rclcpp::Time& stamp) {
@@ -471,18 +472,23 @@ public:
         }
     }
 
-    // Helper: 시간 동기화
+    // Helper: 시간 동기화 - ArUco timestamp에 가장 가까운 odom 찾기
     bool getSyncedOdom(const rclcpp::Time& stamp, nav_msgs::msg::Odometry& result) {
         if (odomQueue_.empty()) return false;
 
-        // 간단하게 가장 최신 것 사용 (실제로는 보간이나 근사 검색 필요)
-        // 여기서는 예시로 가장 뒤에 있는(최신) 데이터를 씀
-        result = odomQueue_.back();
+        double minDiff = std::numeric_limits<double>::max();
+        size_t bestIdx = 0;
+        for (size_t i = 0; i < odomQueue_.size(); ++i) {
+            double diff = std::abs((rclcpp::Time(odomQueue_[i].header.stamp) - stamp).seconds());
+            if (diff < minDiff) {
+                minDiff = diff;
+                bestIdx = i;
+            }
+        }
 
-        // 시간 차이가 너무 크면 무시 (0.5초 이상)
-        double diff = std::abs((rclcpp::Time(result.header.stamp) - stamp).seconds());
-        if (diff > 0.5) return false;
+        if (minDiff > 0.5) return false;
 
+        result = odomQueue_[bestIdx];
         return true;
     }
 
@@ -542,13 +548,43 @@ public:
             sphere.pose.position.z = poseMap.translation().z();
             sphere.pose.orientation.w = 1.0;
             sphere.pose.orientation.x = sphere.pose.orientation.y = sphere.pose.orientation.z = 0.0;
-            sphere.scale.x = sphere.scale.y = sphere.scale.z = 0.2;
+            sphere.scale.x = sphere.scale.y = sphere.scale.z = 0.15;
             sphere.color.r = 0.2f;
             sphere.color.g = 0.6f;
             sphere.color.b = 1.0f;
             sphere.color.a = 0.9f;
             sphere.lifetime = rclcpp::Duration(0, 0);
             arr.markers.push_back(sphere);
+
+            // 랜드마크 법선 화살표 (마커 Z축 = 정면 방향)
+            // 회전 행렬의 3번째 열(Z축)을 직접 추출하여 두 점 방식으로 그림
+            visualization_msgs::msg::Marker arrow;
+            arrow.header.stamp = stamp;
+            arrow.header.frame_id = mapFrame;
+            arrow.ns = "landmark_normal";
+            arrow.id = markerId;
+            arrow.type = visualization_msgs::msg::Marker::ARROW;
+            arrow.action = visualization_msgs::msg::Marker::ADD;
+            // 두 점 방식: 시작점 → 끝점 (Z축 방향으로 0.3m)
+            gtsam::Matrix33 R = poseMap.rotation().matrix();
+            geometry_msgs::msg::Point startPt, endPt;
+            startPt.x = poseMap.translation().x();
+            startPt.y = poseMap.translation().y();
+            startPt.z = poseMap.translation().z();
+            endPt.x = startPt.x + 0.3 * R(0, 2);  // Z축 = 3번째 열
+            endPt.y = startPt.y + 0.3 * R(1, 2);
+            endPt.z = startPt.z + 0.3 * R(2, 2);
+            arrow.points.push_back(startPt);
+            arrow.points.push_back(endPt);
+            arrow.scale.x = 0.02;  // shaft 직경
+            arrow.scale.y = 0.04;  // head 직경
+            arrow.scale.z = 0.0;   // head 길이 (auto)
+            arrow.color.r = 0.3f;
+            arrow.color.g = 0.3f;
+            arrow.color.b = 1.0f;  // 파란색 (Z축 = 법선)
+            arrow.color.a = 0.9f;
+            arrow.lifetime = rclcpp::Duration(0, 0);
+            arr.markers.push_back(arrow);
 
             visualization_msgs::msg::Marker text;
             text.header.stamp = stamp;
