@@ -109,7 +109,7 @@ def generate_launch_description():
         ],
         remappings=[
             ('/aruco_poses', '/aruco_poses'),  # Needs MarkerArray from detector
-            ('/odometry/global', '/odometry/global'),
+            ('/odometry/global', '/aruco_slam/odom'), # BUG-C2 Fix: Synchronize with wheel_odom_node
             ('/path', '/path'),
         ]
     )

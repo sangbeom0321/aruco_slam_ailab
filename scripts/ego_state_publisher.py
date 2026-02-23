@@ -17,6 +17,7 @@ from nav_msgs.msg import Odometry
 from geometry_msgs.msg import PoseStamped, Quaternion
 from hunter_msgs2.msg import EgoState
 import tf_transformations
+import tf2_ros
 
 
 def quaternion_to_yaw(q) -> float:
@@ -40,6 +41,10 @@ def yaw_to_quaternion_msg(yaw) -> Quaternion:
 class EgoStatePublisher(Node):
     def __init__(self):
         super().__init__('ego_state_publisher')
+
+        # TF Listener 추가 (map -> base_footprint 조회용)
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
         # /w_odom 구독 (wheel_odom_node 발행, odom frame, pose + velocity)
         self.sub_odom = self.create_subscription(
@@ -69,27 +74,36 @@ class EgoStatePublisher(Node):
             self.get_logger().warn('Time jump detected in EgoState! Resetting.')
             self._prev_v = 0.0
             self._prev_stamp = stamp
-            
-            
+            self.tf_buffer.clear()
+
         # EgoState 발행 — SLAM 최종 출력 (차량 전체 상태)
         ego = EgoState()
         ego.header.stamp = msg.header.stamp
-        ego.header.frame_id = 'odom'
-        ego.x = msg.pose.pose.position.x
-        ego.y = msg.pose.pose.position.y
-        ego.yaw = yaw
+
+        # [BUG-C1 Fix] TF(map -> base_footprint)를 조회하여 Map 기준 좌표 할당
+        try:
+            t = self.tf_buffer.lookup_transform('map', 'base_footprint', rclpy.time.Time())
+            ego.header.frame_id = 'map'
+            ego.x = t.transform.translation.x
+            ego.y = t.transform.translation.y
+            ego.yaw = quaternion_to_yaw(t.transform.rotation)
+        except Exception as e:
+            # TF 조회가 안 되면 fallback으로 odom 좌표 사용
+            ego.header.frame_id = 'odom'
+            ego.x = msg.pose.pose.position.x
+            ego.y = msg.pose.pose.position.y
+            ego.yaw = yaw
+
         ego.v = msg.twist.twist.linear.x
         ego.yaw_rate = msg.twist.twist.angular.z
 
         # 가속도 계산: Finite Difference
         if self._prev_stamp is not None:
-            dt = (stamp - self._prev_stamp).nanoseconds * 1e-9
+            dt = float((stamp - self._prev_stamp).nanoseconds) * 1e-9
             if dt > 0.02:  # 50Hz 이상이면 계산 (너무 작은 dt는 노이즈 유발)
-                a_raw = (ego.v - self._prev_v) / dt
-                ego.a = float(max(-self._accel_clamp, min(self._accel_clamp, a_raw)))
+                a_raw = float((ego.v - self._prev_v) / dt)
+                ego.a = float(max(float(-self._accel_clamp), min(float(self._accel_clamp), a_raw)))
             else:
-                # dt가 너무 작으면 이전 가속도 유지 또는 계산 건너뜀
-                # 여기서는 간단히 0.0 (또는 이전 값 유지 로직 추가 가능)
                 ego.a = 0.0
         else:
             ego.a = 0.0
@@ -104,7 +118,7 @@ class EgoStatePublisher(Node):
         pose_viz.header = ego.header
         pose_viz.pose.position.x = ego.x
         pose_viz.pose.position.y = ego.y
-        pose_viz.pose.orientation = yaw_to_quaternion_msg(yaw)
+        pose_viz.pose.orientation = yaw_to_quaternion_msg(ego.yaw)
         self.pub_ego_viz.publish(pose_viz)
 
 
