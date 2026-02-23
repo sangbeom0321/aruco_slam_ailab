@@ -6,7 +6,7 @@ import yaml
 from os.path import join
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, TimerAction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -70,9 +70,9 @@ def generate_launch_description():
             {'use_sim_time': use_sim_time},
             {'wheel_radius': 0.165},
             {'track_width': 0.605},
-            {'base_frame': 'base_link'},
+            {'base_frame': 'base_footprint'},
             {'odom_frame': 'odom'},
-            {'publish_tf': True},  # TF odom->base_link (graph_optimizer는 publish_tf=false)
+            {'publish_tf': True},  # TF odom->base_footprint (graph_optimizer는 publish_tf=false)
             {'wheel_odom_topic': '/w_odom'},
             {'sync_with_slam_topic': '/aruco_slam/odom'},
             {'wheel_odom_correction_topic': '/odometry/wheel_odom_correction'},
@@ -109,7 +109,7 @@ def generate_launch_description():
         ],
         remappings=[
             ('/aruco_poses', '/aruco_poses'),  # Needs MarkerArray from detector
-            ('/odometry/global', '/odometry/global'),
+            ('/odometry/global', '/aruco_slam/odom'), # BUG-C2 Fix: Synchronize with wheel_odom_node
             ('/path', '/path'),
         ]
     )
@@ -121,12 +121,14 @@ def generate_launch_description():
         executable='landmark_boundary_occupancy_grid_node.py',
         name='landmark_boundary_occupancy_grid_node',
         output='screen',
+        respawn=True,           # 추가: 죽으면 자동 부활
+        respawn_delay=2.0,      # 추가: 부활 간격 2초
         parameters=[
             {'use_sim_time': use_sim_time},
             {'map_path': map_path_from_config},
             {'frame_id': 'map'},
             {'resolution': 0.05},
-            {'wall_thickness': 2},
+            {'wall_thickness': 1},
             {'publish_rate': 1.0},
         ],
     )
@@ -139,8 +141,23 @@ def generate_launch_description():
         executable='rviz2',
         name='rviz2',
         arguments=['-d', rviz_config],
+    )
+
+    # EgoState publisher: /odom (속도) + TF(map→base_footprint) → /ego_state (50Hz)
+    ego_state_node = Node(
+        package='aruco_sam_ailab',
+        executable='ego_state_publisher.py',
+        name='ego_state_publisher',
+        output='screen',
+        respawn=True,           # 추가: 죽으면 자동 부활
+        respawn_delay=2.0,      # 추가: 부활 간격 2초
         parameters=[{'use_sim_time': use_sim_time}],
-        output='screen'
+    )
+
+    # graph_optimizer: 5-second delay for startup race condition mitigation
+    graph_optimizer_action = TimerAction(
+        period=5.0,
+        actions=[graph_optimizer_node]
     )
 
     ld_actions = [
@@ -150,10 +167,13 @@ def generate_launch_description():
         odom_topic_arg,
         wheel_odom_node,
         aruco_detector_front,
-        graph_optimizer_node,
+        graph_optimizer_action,
     ]
     if run_mode_from_config == 'localization':
         ld_actions.append(landmark_boundary_map_node)
-    ld_actions.append(rviz_node)
+    ld_actions.append(ego_state_node)
+    # RViz는 hunter2_bringup/navigation.launch.py에서 통합 실행
+    # (단독 실행 시 필요하면 아래 주석 해제)
+    # ld_actions.append(rviz_node)
 
     return LaunchDescription(ld_actions)

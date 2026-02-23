@@ -37,6 +37,7 @@ public:
   WheelOdomNode() : Node("wheel_odom_node") {
     // --- Parameters ---
     declare_parameter("wheel_radius", 0.165);
+    declare_parameter("wheelbase", 0.65);
     declare_parameter("track_width", 0.605);
     declare_parameter("base_frame", "base_link");
     declare_parameter("base_footprint_frame", "base_footprint");  // odom child (URDF: odom->base_footprint->base_link)
@@ -48,6 +49,7 @@ public:
     declare_parameter("buffer_duration", 5.0);  // 버퍼 보관 시간 (초)
 
     wheel_radius_ = get_parameter("wheel_radius").as_double();
+    wheelbase_ = get_parameter("wheelbase").as_double();
     track_width_ = get_parameter("track_width").as_double();
     base_frame_ = get_parameter("base_frame").as_string();
     base_footprint_frame_ = get_parameter("base_footprint_frame").as_string();
@@ -58,6 +60,16 @@ public:
     std::string odom_topic = get_parameter("wheel_odom_topic").as_string();
     std::string correction_topic = get_parameter("wheel_odom_correction_topic").as_string();
     std::string sync_topic = get_parameter("sync_with_slam_topic").as_string();
+
+    declare_parameter("max_correction_dist", 10.0);
+    declare_parameter("max_correction_yaw", 3.15);
+    max_correction_dist_ = get_parameter("max_correction_dist").as_double();
+    max_correction_yaw_ = get_parameter("max_correction_yaw").as_double();
+
+    declare_parameter("lpf_alpha", 0.3); // 1.0 = no filter, 0.1 = strong filter
+    lpf_alpha_ = get_parameter("lpf_alpha").as_double();
+    declare_parameter("deadband", 0.001);
+    deadband_ = get_parameter("deadband").as_double();
 
     // --- ROS Interface ---
     sub_joint_ = create_subscription<sensor_msgs::msg::JointState>(
@@ -96,21 +108,43 @@ private:
     rclcpp::Time now = msg->header.stamp;
     if (now.seconds() == 0.0) now = get_clock()->now();
 
+  // === [추가] 시간 역행(Time Jump) 감지 및 리셋 로직 ===
+    if (last_time_initialized_ && now.seconds() < last_time_.seconds()) {
+      RCLCPP_WARN(get_logger(), "\033[1;33mTime jump detected! Resetting Wheel Odometry state...\033[0m");
+      
+      history_buffer_.clear();      // 과거 궤적 삭제
+      current_pose_x_ = 0.0;        // 위치 강제 초기화
+      current_pose_y_ = 0.0;
+      current_pose_yaw_ = 0.0;
+      v_linear_filt_ = 0.0;         // 필터 속도 초기화
+      omega_filt_ = 0.0;
+      
+      // [추가] 리셋 직후 0.0 상태를 즉시 퍼블리시해서 제어기 측의 대기를 방지
+      last_time_ = now;
+      publishOdometry(now, 0.0, 0.0);
+      return; 
+    }
+
     // 조인트 속도 추출
     double v_l = 0.0, v_r = 0.0;
-    bool l_found = false, r_found = false;
+    double steer_l = 0.0, steer_r = 0.0;
+    bool l_found = false, r_found = false, sl_found = false, sr_found = false;
     for (size_t i = 0; i < msg->name.size(); ++i) {
-      if (i < msg->velocity.size()) {
-        if (msg->name[i] == "rear_left_joint") {
-          v_l = msg->velocity[i];
-          l_found = true;
-        } else if (msg->name[i] == "rear_right_joint") {
-          v_r = msg->velocity[i];
-          r_found = true;
-        }
+      if (msg->name[i] == "rear_left_joint" && i < msg->velocity.size()) {
+        v_l = msg->velocity[i];
+        l_found = true;
+      } else if (msg->name[i] == "rear_right_joint" && i < msg->velocity.size()) {
+        v_r = msg->velocity[i];
+        r_found = true;
+      } else if (msg->name[i] == "front_steer_left_joint" && i < msg->position.size()) {
+        steer_l = msg->position[i];
+        sl_found = true;
+      } else if (msg->name[i] == "front_steer_right_joint" && i < msg->position.size()) {
+        steer_r = msg->position[i];
+        sr_found = true;
       }
     }
-    if (!l_found || !r_found) return;
+    if (!l_found || !r_found || !sl_found || !sr_found) return;
 
     std::lock_guard<std::mutex> lock(mtx_);
 
@@ -125,8 +159,20 @@ private:
     if (dt <= 0.0 || dt > 1.0) return;
 
     // 운동학 계산 (Differential / Ackermann approximate)
-    double v_linear = (v_l + v_r) * wheel_radius_ / 2.0;
-    double omega = (v_r - v_l) * wheel_radius_ / track_width_;
+    double v_raw = (v_l + v_r) * wheel_radius_ / 2.0;
+    double steer_avg = (steer_l + steer_r) / 2.0;
+    double w_raw = (v_raw * std::tan(steer_avg)) / wheelbase_;
+
+    // Deadband 적용 (정지 시 잔진동 제거)
+    if (std::abs(v_raw) < deadband_) v_raw = 0.0;
+    if (std::abs(w_raw) < deadband_ / 0.1) w_raw = 0.0; // angular는 약간 더 완화 가능
+
+    // Low-Pass Filter (LPF) 적용
+    v_linear_filt_ = lpf_alpha_ * v_raw + (1.0 - lpf_alpha_) * v_linear_filt_;
+    omega_filt_    = lpf_alpha_ * w_raw + (1.0 - lpf_alpha_) * omega_filt_;
+
+    double v_linear = v_linear_filt_;
+    double omega    = omega_filt_;
 
     // 1) 버퍼에 저장 (나중에 재적분을 위해)
     VelocityMeasurement meas;
@@ -166,6 +212,11 @@ private:
     double anchor_y = msg->pose.pose.position.y;
     double anchor_yaw = getYaw(msg->pose.pose.orientation);
 
+    // 1) 보정 크기 검증 (초기화 전에는 무조건 적용)
+    if (initialized_ && !isCorrectionValid(anchor_x, anchor_y, anchor_yaw)) {
+      return;
+    }
+
     // 2) 버퍼 정리: 보정된 시간(corr_time)보다 이전 데이터는 모두 삭제
     while (!history_buffer_.empty()) {
       if (history_buffer_.front().stamp <= corr_time) {
@@ -185,18 +236,21 @@ private:
                      meas.v_linear, meas.omega, meas.dt);
     }
 
+
     if (!initialized_) initialized_ = true;
   }
 
   void slamInitCallback(const nav_msgs::msg::Odometry::SharedPtr msg) {
     std::lock_guard<std::mutex> lock(mtx_);
-    if (initialized_) return;
+    // Always allow initialization if we are at (0,0) or if not initialized
+    if (initialized_ && (std::abs(current_pose_x_) > 1e-3 || std::abs(current_pose_y_) > 1e-3)) return;
 
     current_pose_x_ = msg->pose.pose.position.x;
     current_pose_y_ = msg->pose.pose.position.y;
     current_pose_yaw_ = getYaw(msg->pose.pose.orientation);
     initialized_ = true;
-    RCLCPP_INFO(get_logger(), "Initialized Pose by SLAM: x=%.3f, y=%.3f", current_pose_x_, current_pose_y_);
+    RCLCPP_INFO(get_logger(), "Initialized/Reset Pose by SLAM: x=%.3f, y=%.3f, yaw=%.3f",
+                current_pose_x_, current_pose_y_, current_pose_yaw_);
   }
 
   // =================================================================================
@@ -209,6 +263,27 @@ private:
     yaw += w * dt;
     yaw = std::atan2(std::sin(yaw), std::cos(yaw));
   }
+
+  // 보정 유효성 검사: 거리 및 yaw 변화량이 한계 이내인지 확인
+  bool isCorrectionValid(double ax, double ay, double ayaw) {
+    const double dist = std::hypot(ax - current_pose_x_, ay - current_pose_y_);
+    const double dyaw = std::abs(normalizeAngle(ayaw - current_pose_yaw_));
+
+    if (dist > max_correction_dist_ || dyaw > max_correction_yaw_) {
+      RCLCPP_WARN(get_logger(),
+                  "SLAM 보정 거부: dist=%.3fm (limit=%.1f), dyaw=%.3frad (limit=%.2f)",
+                  dist, max_correction_dist_, dyaw, max_correction_yaw_);
+      return false;
+    }
+    return true;
+  }
+
+  double normalizeAngle(double angle) {
+    while (angle > M_PI) angle -= 2.0 * M_PI;
+    while (angle < -M_PI) angle += 2.0 * M_PI;
+    return angle;
+  }
+
 
   double getYaw(const geometry_msgs::msg::Quaternion& q_msg) {
     tf2::Quaternion q(q_msg.x, q_msg.y, q_msg.z, q_msg.w);
@@ -256,12 +331,16 @@ private:
 
   // --- Variables ---
   double wheel_radius_;
+  double wheelbase_;
   double track_width_;
   std::string base_frame_;
   std::string base_footprint_frame_;
   std::string odom_frame_;
   bool publish_tf_;
   double buffer_duration_;
+  double max_correction_dist_;
+  double max_correction_yaw_;
+
 
   std::mutex mtx_;
   bool initialized_ = false;
@@ -273,6 +352,12 @@ private:
   double current_pose_yaw_ = 0.0;
 
   std::deque<VelocityMeasurement> history_buffer_;
+
+  // Stability
+  double v_linear_filt_ = 0.0;
+  double omega_filt_ = 0.0;
+  double lpf_alpha_;
+  double deadband_;
 
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr sub_joint_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr sub_correction_;

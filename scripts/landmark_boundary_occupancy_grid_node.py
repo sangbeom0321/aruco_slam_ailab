@@ -4,6 +4,10 @@
 =====================================
 Localization 모드에서 landmarks_map.json의 id 0~9를 직선으로 연결하여
 벽 테두리로 하는 2D occupancy grid를 발행합니다.
+
+발행 토픽:
+  /global_map (OccupancyGrid): 전체 ArUco 경계 맵
+  /local_map  (OccupancyGrid): 로봇 주변 local_map_size × local_map_size 윈도우
 """
 
 import json
@@ -11,10 +15,14 @@ import math
 from pathlib import Path
 
 import rclpy
+import rclpy.duration
+import rclpy.time
 from rclpy.node import Node
 from nav_msgs.msg import OccupancyGrid
 from std_msgs.msg import Header
+from geometry_msgs.msg import PointStamped
 from visualization_msgs.msg import Marker, MarkerArray
+from tf2_ros import Buffer, TransformListener
 
 
 def bresenham_line(x0: int, y0: int, x1: int, y1: int):
@@ -45,9 +53,10 @@ class LandmarkBoundaryOccupancyGridNode(Node):
 
         self.declare_parameter('map_path', '')
         self.declare_parameter('frame_id', 'map')
-        self.declare_parameter('resolution', 0.05)  # m per cell
-        self.declare_parameter('wall_thickness', 2)  # cells (벽 두께)
-        self.declare_parameter('publish_rate', 1.0)  # Hz
+        self.declare_parameter('resolution', 0.1)  # m per cell (성능 최적화: 0.05 → 0.1)
+        self.declare_parameter('wall_thickness', 1)  # cells (벽 두께)
+        self.declare_parameter('publish_rate', 0.5)  # Hz
+        self.declare_parameter('local_map_size', 10.0)  # m (로봇 주변 윈도우 크기)
 
         map_path = self.get_parameter('map_path').get_parameter_value().string_value
         if not map_path:
@@ -61,6 +70,7 @@ class LandmarkBoundaryOccupancyGridNode(Node):
         self.frame_id = self.get_parameter('frame_id').get_parameter_value().string_value
         self.resolution = self.get_parameter('resolution').get_parameter_value().double_value
         self.wall_thickness = self.get_parameter('wall_thickness').get_parameter_value().integer_value
+        self.local_map_size = self.get_parameter('local_map_size').get_parameter_value().double_value
         publish_rate = self.get_parameter('publish_rate').get_parameter_value().double_value
 
         self.landmarks_xy = self._load_landmarks_0_to_9(map_path)
@@ -70,12 +80,33 @@ class LandmarkBoundaryOccupancyGridNode(Node):
 
         self.landmarks_all = self._load_all_landmarks(map_path)
 
-        self.pub_map = self.create_publisher(OccupancyGrid, '/map', 10)
+        # TF2 Buffer & Listener (map → base_footprint)
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
+
+        # Publishers — TransientLocal QoS: planner_controller_node 구독자와 QoS 일치
+        # (Volatile publisher + TransientLocal subscriber = 연결 불가)
+        latched_qos = rclpy.qos.QoSProfile(
+            depth=1,
+            durability=rclpy.qos.DurabilityPolicy.TRANSIENT_LOCAL,
+            reliability=rclpy.qos.ReliabilityPolicy.RELIABLE,
+            history=rclpy.qos.HistoryPolicy.KEEP_LAST,
+        )
+        self.pub_map = self.create_publisher(OccupancyGrid, '/global_map', latched_qos)
+        self.pub_local_map = self.create_publisher(OccupancyGrid, '/local_map', latched_qos)
         self.pub_landmarks = self.create_publisher(MarkerArray, '/aruco_slam/landmarks', 10)
+
+        # 수동 장애물 (RViz Publish Point 도구 → /clicked_point)
+        self.manual_obstacles = []  # [(x, y), ...]
+        self.sub_clicked = self.create_subscription(
+            PointStamped, '/clicked_point', self._clicked_point_callback, 10)
+
         self.timer = self.create_timer(1.0 / publish_rate, self.publish_map)
         self.get_logger().info(
-            'Landmark boundary occupancy grid 노드 시작 (랜드마크 %d개, resolution=%.3f, viz %d개)'
-            % (len(self.landmarks_xy), self.resolution, len(self.landmarks_all))
+            'Landmark boundary occupancy grid 노드 시작 (랜드마크 %d개, resolution=%.3f, '
+            'local_map_size=%.1fm, viz %d개)'
+            % (len(self.landmarks_xy), self.resolution,
+                self.local_map_size, len(self.landmarks_all))
         )
 
     def _get_package_share_directory(self):
@@ -132,6 +163,12 @@ class LandmarkBoundaryOccupancyGridNode(Node):
             z = pos.get('z', 0.0)
             result.append((lid, x, y, z))
         return result
+
+    def _clicked_point_callback(self, msg: PointStamped):
+        """RViz Publish Point 도구 클릭 → 해당 좌표에 수동 장애물 추가."""
+        self.manual_obstacles.append((msg.point.x, msg.point.y))
+        self.get_logger().info(
+            f'장애물 추가: ({msg.point.x:.2f}, {msg.point.y:.2f}), 총 {len(self.manual_obstacles)}개')
 
     def _world_to_grid(self, x: float, y: float, origin_x: float, origin_y: float) -> tuple:
         """월드 좌표를 그리드 인덱스로 변환."""
@@ -204,6 +241,17 @@ class LandmarkBoundaryOccupancyGridNode(Node):
                 points[j][0], points[j][1]
             )
 
+        # 수동 장애물 마킹 (반경 0.3m 원형)
+        obstacle_radius_cells = max(1, int(0.3 / self.resolution))
+        for (ox, oy) in self.manual_obstacles:
+            ogx, ogy = self._world_to_grid(ox, oy, min_x, min_y)
+            for dx in range(-obstacle_radius_cells, obstacle_radius_cells + 1):
+                for dy in range(-obstacle_radius_cells, obstacle_radius_cells + 1):
+                    if dx * dx + dy * dy <= obstacle_radius_cells * obstacle_radius_cells:
+                        nx, ny = ogx + dx, ogy + dy
+                        if 0 <= nx < width and 0 <= ny < height:
+                            grid[ny * width + nx] = 100  # OCCUPIED
+
         # 벽 안쪽: FREE(0), 바깥: UNKNOWN(-1)
         for gy in range(height):
             for gx in range(width):
@@ -229,6 +277,44 @@ class LandmarkBoundaryOccupancyGridNode(Node):
         msg.info.origin.orientation.z = 0.0
         msg.info.origin.orientation.w = 1.0
         msg.data = grid
+        return msg
+
+    def _build_local_occupancy_grid(self, robot_x: float, robot_y: float,
+                                    full_grid: OccupancyGrid) -> OccupancyGrid:
+        """로봇 주변 local_map_size × local_map_size 윈도우를 full_grid에서 잘라 반환."""
+        half = self.local_map_size / 2.0
+        local_origin_x = robot_x - half
+        local_origin_y = robot_y - half
+        n_cells = int(self.local_map_size / self.resolution)
+
+        full_ox = full_grid.info.origin.position.x
+        full_oy = full_grid.info.origin.position.y
+        full_w = full_grid.info.width
+        full_h = full_grid.info.height
+
+        local_data = []
+        for gy in range(n_cells):
+            for gx in range(n_cells):
+                wx = local_origin_x + (gx + 0.5) * self.resolution
+                wy = local_origin_y + (gy + 0.5) * self.resolution
+                fgx = int((wx - full_ox) / self.resolution)
+                fgy = int((wy - full_oy) / self.resolution)
+                if 0 <= fgx < full_w and 0 <= fgy < full_h:
+                    local_data.append(full_grid.data[fgy * full_w + fgx])
+                else:
+                    local_data.append(-1)  # unknown (맵 범위 밖)
+
+        msg = OccupancyGrid()
+        msg.header.frame_id = self.frame_id
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.info.resolution = self.resolution
+        msg.info.width = n_cells
+        msg.info.height = n_cells
+        msg.info.origin.position.x = local_origin_x
+        msg.info.origin.position.y = local_origin_y
+        msg.info.origin.position.z = 0.0
+        msg.info.origin.orientation.w = 1.0
+        msg.data = local_data
         return msg
 
     def _build_landmarks_marker_array(self) -> MarkerArray:
@@ -275,9 +361,26 @@ class LandmarkBoundaryOccupancyGridNode(Node):
         return arr
 
     def publish_map(self):
-        msg = self._build_occupancy_grid()
-        if msg:
-            self.pub_map.publish(msg)
+        # [1] 전체 경계 맵 발행 → /global_map
+        full_msg = self._build_occupancy_grid()
+        if full_msg is None:
+            return
+        self.pub_map.publish(full_msg)
+
+        # [2] 로컬 윈도우 맵 발행 → /local_map (TF로 로봇 위치 조회 후 crop)
+        try:
+            t = self.tf_buffer.lookup_transform(
+                'map', 'base_footprint',
+                rclpy.time.Time(),
+                timeout=rclpy.duration.Duration(seconds=0.05))
+            rx = t.transform.translation.x
+            ry = t.transform.translation.y
+            local_msg = self._build_local_occupancy_grid(rx, ry, full_msg)
+            self.pub_local_map.publish(local_msg)
+        except Exception:
+            pass  # TF 미준비 시 local_map 발행 생략 (초기화 중)
+
+        # [3] 랜드마크 시각화 마커 발행
         if self.landmarks_all:
             self.pub_landmarks.publish(self._build_landmarks_marker_array())
 
@@ -291,7 +394,8 @@ def main(args=None):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():          # 추가: rclpy가 아직 켜져 있을 때만 끕니다.
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

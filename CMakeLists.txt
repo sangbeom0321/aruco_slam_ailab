@@ -100,6 +100,11 @@ install(PROGRAMS scripts/landmark_boundary_occupancy_grid_node.py
     DESTINATION lib/${PROJECT_NAME}
 )
 
+# Install ego_state_publisher (odom + TF → /ego_state for planner)
+install(PROGRAMS scripts/ego_state_publisher.py
+    DESTINATION lib/${PROJECT_NAME}
+)
+
 # C++ executables
 # Note: Source files will be created in Step 3-4
 # For now, we prepare the structure
