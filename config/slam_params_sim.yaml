@@ -1,0 +1,84 @@
+/**:
+  ros__parameters:
+    # Topics
+    aruco_poses_topic: "/aruco_poses"
+    imu_topic: "/camera/imu"
+
+    # Frames
+    base_link_frame: "base_footprint"
+    imu_frame: "base_footprint"       # Gazebo IMU는 chassis에 부착 (base_link ≈ base_footprint)
+    camera_frame: "camera_color_optical_frame"
+    odom_frame: "odom"
+    map_frame: "map"
+
+    # 랜드마크 저장 서비스 저장 위치
+    landmarks_save_path: "/ros_ws/src/aruco_sam_ailab/map/landmarks_map.json"
+
+    # [모드 설정 - launch 인자 또는 이 파일에서 변경]
+    # run_mode: "mapping" (맵 생성) | "localization" (위치 추정, 맵 고정)
+    run_mode: "mapping"
+    # map_path: Localization 모드에서 로드할 맵 파일 (landmarks_map.json 형식)
+    map_path: "/ros_ws/src/aruco_sam_ailab/map/landmarks_map.json"
+
+    # 벽 경계 생성 시 랜드마크 연결 순서 (순서대로 직선 연결, 마지막→첫번째 닫힘)
+    boundary_id_order: [11, 12, 13, 14, 15, 16, 17, 18, 20, 19]
+
+    # base_footprint -> camera_color_optical_frame (Gazebo tf2_echo)
+    ext_trans_base_cam: [0.411, 0.049, 0.398]
+    ext_rot_base_cam: [0.0, 0.0, 1.0, -1.0, 0.0, 0.0, 0.0, -1.0, 0.0]
+
+    # base_footprint -> camera_depth_optical_frame (Gazebo tf2_echo)
+    ext_trans_base_depth_cam: [0.411, 0.048, 0.398]
+    ext_rot_base_depth_cam: [0.0, 0.0, 1.0, -1.0, 0.0, 0.0, 0.0, -1.0, 0.0]
+
+    # base_footprint -> IMU frame (Gazebo: IMU on chassis, 거의 동일 위치)
+    ext_trans_base_imu: [0.0, 0.0, 0.0]
+    ext_rot_base_imu: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+
+    # IMU noise parameters (Gazebo 시뮬레이션 기준 튜닝)
+    # 역할: heading(yaw) 실시간 반응. gyro noise tight → 회전 신뢰 ↑
+    imu_acc_noise: 0.005      # acc noise density (원본 0.0015 × 3.3) — position은 wheel odom 담당
+    imu_gyr_noise: 0.0005     # gyr noise density — tight → heading 실시간성 ↑
+    imu_acc_bias_n: 0.0013    # acc bias instability (원본 0.0004 × 3.3)
+    imu_gyr_bias_n: 0.00003   # gyr bias instability — code에서 acc 100x, gyro 10x 분리 적용
+    imu_gravity: 9.81
+
+    # IMU flag
+    use_imu: true
+
+    # ArUco observation parameters
+    # 역할: 누적 드리프트 보정. rotation은 loose → heading 지배 방지, IMU가 담당
+    aruco_trans_noise: 0.08    # position 보정은 신뢰
+    aruco_rot_noise: 0.50      # rotation 느슨하게 → heading은 IMU 주도
+
+    # Wheel odometry BetweenFactor parameters
+    # 역할: position(x,y) 강인함. heading은 IMU에 맡김.
+    # 2D UGV: z/roll/pitch delta ≈ 0 이므로 tight → 평면 구속 역할
+    use_wheel_odom: true
+    wheel_odom_topic: "/w_odom"
+    wheel_odom_noise_x: 0.05      # tight — wheel odom position 신뢰
+    wheel_odom_noise_y: 0.05      # tight — wheel odom position 신뢰
+    wheel_odom_noise_z: 0.01      # tight — 2D UGV, 높이 변화 없음 (평면 구속)
+    wheel_odom_noise_roll: 0.01   # tight — 2D UGV, roll 변화 없음 (평면 구속)
+    wheel_odom_noise_pitch: 0.01  # tight — 2D UGV, pitch 변화 없음 (평면 구속)
+    wheel_odom_noise_yaw: 1.0     # loose — Ackermann heading 느림, IMU가 담당
+
+    # Keyframe policy: IMU odom 드리프트가 크므로 짧은 간격으로 보정
+    keyframe_time_interval: 0.5
+    keyframe_distance_threshold: 0.15
+    keyframe_angle_threshold: 0.1
+
+    # ISAM2 parameters
+    isam_relinearize_threshold: 0.1
+    isam_relinearize_skip: 1
+
+    # EKF Smoother: IMU odom + SLAM correction fusion
+    # Process noise (σ per √s): how much IMU odom drifts
+    ekf_process_noise_pos: 0.15    # position drift σ (m/√s) — IMU position은 드리프트 허용
+    ekf_process_noise_rot: 0.02    # rotation drift σ (rad/√s) — IMU heading 신뢰 ↑
+    # Measurement noise (σ): SLAM correction accuracy — 높을수록 부드러움 ↑
+    ekf_measurement_noise_pos: 0.05    # SLAM position σ (m) — position 보정 빠르게
+    ekf_measurement_noise_rot: 0.15    # SLAM rotation σ (rad) — heading 보정은 부드럽게
+
+    # Debug
+    enable_topic_debug_log: true

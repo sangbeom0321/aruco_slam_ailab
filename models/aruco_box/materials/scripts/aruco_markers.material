@@ -1,4 +1,4 @@
-material Aruco/Marker0
+material Aruco/Marker11
 {
   technique
   {
@@ -10,7 +10,7 @@ material Aruco/Marker0
 
       texture_unit
       {
-        texture aruco_4x4_50_id0.png
+        texture aruco_4x4_50_id11.png
         filtering anisotropic
         max_anisotropy 8
       }
@@ -18,7 +18,7 @@ material Aruco/Marker0
   }
 }
 
-material Aruco/Marker1
+material Aruco/Marker12
 {
   technique
   {
@@ -30,7 +30,7 @@ material Aruco/Marker1
 
       texture_unit
       {
-        texture aruco_4x4_50_id1.png
+        texture aruco_4x4_50_id12.png
         filtering anisotropic
         max_anisotropy 8
       }
@@ -38,7 +38,7 @@ material Aruco/Marker1
   }
 }
 
-material Aruco/Marker2
+material Aruco/Marker13
 {
   technique
   {
@@ -50,7 +50,7 @@ material Aruco/Marker2
 
       texture_unit
       {
-        texture aruco_4x4_50_id2.png
+        texture aruco_4x4_50_id13.png
         filtering anisotropic
         max_anisotropy 8
       }
@@ -58,7 +58,7 @@ material Aruco/Marker2
   }
 }
 
-material Aruco/Marker3
+material Aruco/Marker14
 {
   technique
   {
@@ -70,7 +70,7 @@ material Aruco/Marker3
 
       texture_unit
       {
-        texture aruco_4x4_50_id3.png
+        texture aruco_4x4_50_id14.png
         filtering anisotropic
         max_anisotropy 8
       }
@@ -78,7 +78,7 @@ material Aruco/Marker3
   }
 }
 
-material Aruco/Marker4
+material Aruco/Marker15
 {
   technique
   {
@@ -90,7 +90,7 @@ material Aruco/Marker4
 
       texture_unit
       {
-        texture aruco_4x4_50_id4.png
+        texture aruco_4x4_50_id15.png
         filtering anisotropic
         max_anisotropy 8
       }
@@ -98,7 +98,7 @@ material Aruco/Marker4
   }
 }
 
-material Aruco/Marker5
+material Aruco/Marker16
 {
   technique
   {
@@ -110,7 +110,7 @@ material Aruco/Marker5
 
       texture_unit
       {
-        texture aruco_4x4_50_id5.png
+        texture aruco_4x4_50_id16.png
         filtering anisotropic
         max_anisotropy 8
       }
@@ -118,7 +118,7 @@ material Aruco/Marker5
   }
 }
 
-material Aruco/Marker6
+material Aruco/Marker17
 {
   technique
   {
@@ -130,7 +130,7 @@ material Aruco/Marker6
 
       texture_unit
       {
-        texture aruco_4x4_50_id6.png
+        texture aruco_4x4_50_id17.png
         filtering anisotropic
         max_anisotropy 8
       }
@@ -138,7 +138,7 @@ material Aruco/Marker6
   }
 }
 
-material Aruco/Marker7
+material Aruco/Marker18
 {
   technique
   {
@@ -150,7 +150,7 @@ material Aruco/Marker7
 
       texture_unit
       {
-        texture aruco_4x4_50_id7.png
+        texture aruco_4x4_50_id18.png
         filtering anisotropic
         max_anisotropy 8
       }
@@ -158,7 +158,7 @@ material Aruco/Marker7
   }
 }
 
-material Aruco/Marker8
+material Aruco/Marker19
 {
   technique
   {
@@ -170,7 +170,7 @@ material Aruco/Marker8
 
       texture_unit
       {
-        texture aruco_4x4_50_id8.png
+        texture aruco_4x4_50_id19.png
         filtering anisotropic
         max_anisotropy 8
       }
@@ -178,7 +178,7 @@ material Aruco/Marker8
   }
 }
 
-material Aruco/Marker9
+material Aruco/Marker20
 {
   technique
   {
@@ -190,7 +190,7 @@ material Aruco/Marker9
 
       texture_unit
       {
-        texture aruco_4x4_50_id9.png
+        texture aruco_4x4_50_id20.png
         filtering anisotropic
         max_anisotropy 8
       }

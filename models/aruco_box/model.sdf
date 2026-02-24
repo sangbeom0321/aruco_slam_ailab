@@ -56,7 +56,7 @@
           <script>
             <uri>model://aruco_box/materials/scripts</uri>
             <uri>model://aruco_box/materials/textures</uri>
-            <name>Aruco/Marker0</name>
+            <name>Aruco/Marker11</name>
           </script>
         </material>
       </visual>
@@ -73,7 +73,7 @@
           <script>
             <uri>model://aruco_box/materials/scripts</uri>
             <uri>model://aruco_box/materials/textures</uri>
-            <name>Aruco/Marker0</name>
+            <name>Aruco/Marker11</name>
           </script>
         </material>
       </visual>

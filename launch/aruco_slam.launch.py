@@ -1,77 +1,32 @@
 #!/usr/bin/env python3
 # IMU+Vision SLAM: ArUco detector + graph_optimizer + imu_preintegration + ekf_smoother.
 # ArUco 관측: camera_color_optical_frame 사용.
+# use_sim_time에 따라 slam_params_sim.yaml 또는 slam_params_real.yaml 자동 선택.
 
 import yaml
 from os.path import join
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, TimerAction
+from launch.actions import DeclareLaunchArgument, TimerAction, OpaqueFunction
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 
 
-def generate_launch_description():
+def launch_setup(context, *args, **kwargs):
     pkg_share_aruco = get_package_share_directory('aruco_sam_ailab')
-    config_file = join(pkg_share_aruco, 'config', 'slam_params.yaml')
 
-    # slam_params.yaml에서 기본값 읽기 (launch 인자 미지정 시 fallback)
-    run_mode_default = 'mapping'
-    map_path_default = join(pkg_share_aruco, 'map', 'landmarks_map.json')
-    try:
-        with open(config_file, 'r') as f:
-            cfg = yaml.safe_load(f)
-        params = cfg.get('/**', {}).get('ros__parameters', {})
-        run_mode_default = params.get('run_mode', 'mapping')
-        map_path_default = params.get('map_path', map_path_default)
-    except Exception:
-        pass
-
-    # Launch arguments
-    use_sim_time_arg = DeclareLaunchArgument(
-        'use_sim_time',
-        default_value='false',
-        description='Use simulation time'
-    )
-
-    run_mode_arg = DeclareLaunchArgument(
-        'run_mode',
-        default_value=run_mode_default,
-        description='SLAM run mode: "mapping" or "localization"'
-    )
-
-    map_path_arg = DeclareLaunchArgument(
-        'map_path',
-        default_value=map_path_default,
-        description='Landmark map file path for localization mode'
-    )
-
-    marker_size_arg = DeclareLaunchArgument(
-        'marker_size',
-        default_value='0.30',
-        description='ArUco marker size in meters'
-    )
-
-    enable_topic_debug_log_arg = DeclareLaunchArgument(
-        'enable_topic_debug_log',
-        default_value='false',
-        description='Enable topic receive debug logs (aruco) for diagnostics'
-    )
-
-    imu_topic_arg = DeclareLaunchArgument(
-        'imu_topic',
-        default_value='/camera/imu',
-        description='Raw IMU topic (sim: /camera/imu, real: /camera/camera/imu)'
-    )
+    # use_sim_time 값에 따라 config 파일 선택
+    use_sim_time_str = context.launch_configurations['use_sim_time']
+    is_sim = use_sim_time_str.lower() in ('true', '1')
+    config_name = 'slam_params_sim.yaml' if is_sim else 'slam_params_real.yaml'
+    config_file = join(pkg_share_aruco, 'config', config_name)
 
     # Launch configurations
     use_sim_time = LaunchConfiguration('use_sim_time')
     run_mode = LaunchConfiguration('run_mode')
     map_path = LaunchConfiguration('map_path')
-    marker_size = LaunchConfiguration('marker_size')
     enable_topic_debug_log = LaunchConfiguration('enable_topic_debug_log', default='true')
-    imu_topic = LaunchConfiguration('imu_topic', default='/camera/imu')
 
     # ArUco detector node for front camera (camera_color_optical_frame)
     # use_depth_correction: Depth로 Z(거리) 보정 → PnP Jitter 감소
@@ -104,7 +59,7 @@ def generate_launch_description():
     )
 
     # Landmark boundary occupancy grid (run_mode=="localization"일 때만)
-    # id 0~9를 직선으로 연결한 벽 테두리 → /map (nav_msgs/OccupancyGrid)
+    # id 11~20을 직선으로 연결한 벽 테두리 → /map (nav_msgs/OccupancyGrid)
     is_localization = PythonExpression(["'", run_mode, "' == 'localization'"])
     landmark_boundary_map_node = Node(
         package='aruco_sam_ailab',
@@ -127,7 +82,6 @@ def generate_launch_description():
 
     # RViz node with aruco_viz.rviz config
     rviz_config = join(pkg_share_aruco, 'rviz', 'aruco_viz.rviz')
-    # rviz_config = join(pkg_share_aruco, 'rviz', 'aruco_detection_debug.rviz')
     rviz_node = Node(
         package='rviz2',
         executable='rviz2',
@@ -137,6 +91,7 @@ def generate_launch_description():
 
     # IMU Preintegration: raw IMU → dead reckoning odom (~200Hz)
     # mapping: origin에서 즉시 시작, localization: SLAM 초기 위치 추정 대기
+    # imu_topic은 config 파일에서 자동 로드 (sim/real 분리)
     imu_preintegration_node = Node(
         package='aruco_sam_ailab',
         executable='imu_preintegration',
@@ -145,8 +100,7 @@ def generate_launch_description():
         parameters=[
             config_file,
             {'use_sim_time': use_sim_time,
-             'run_mode': run_mode,
-             'imu_topic': imu_topic},
+             'run_mode': run_mode},
         ],
     )
 
@@ -169,8 +123,8 @@ def generate_launch_description():
         executable='ego_state_publisher.py',
         name='ego_state_publisher',
         output='screen',
-        respawn=True,           # 추가: 죽으면 자동 부활
-        respawn_delay=2.0,      # 추가: 부활 간격 2초
+        respawn=True,
+        respawn_delay=2.0,
         parameters=[{'use_sim_time': use_sim_time}],
     )
 
@@ -188,13 +142,7 @@ def generate_launch_description():
         actions=[graph_optimizer_node]
     )
 
-    return LaunchDescription([
-        use_sim_time_arg,
-        run_mode_arg,
-        map_path_arg,
-        marker_size_arg,
-        enable_topic_debug_log_arg,
-        imu_topic_arg,
+    return [
         static_tf_map_odom,
         imu_preintegration_node,
         aruco_detector_front,
@@ -205,4 +153,46 @@ def generate_launch_description():
         # RViz는 hunter2_bringup/navigation.launch.py에서 통합 실행
         # (단독 실행 시 필요하면 아래 주석 해제)
         # rviz_node,
+    ]
+
+
+def generate_launch_description():
+    # Launch arguments (OpaqueFunction 내부에서 resolve)
+    use_sim_time_arg = DeclareLaunchArgument(
+        'use_sim_time',
+        default_value='false',
+        description='Use simulation time'
+    )
+
+    run_mode_arg = DeclareLaunchArgument(
+        'run_mode',
+        default_value='mapping',
+        description='SLAM run mode: "mapping" or "localization"'
+    )
+
+    map_path_arg = DeclareLaunchArgument(
+        'map_path',
+        default_value='/ros_ws/src/aruco_sam_ailab/map/landmarks_map.json',
+        description='Landmark map file path for localization mode'
+    )
+
+    marker_size_arg = DeclareLaunchArgument(
+        'marker_size',
+        default_value='0.30',
+        description='ArUco marker size in meters'
+    )
+
+    enable_topic_debug_log_arg = DeclareLaunchArgument(
+        'enable_topic_debug_log',
+        default_value='false',
+        description='Enable topic receive debug logs (aruco) for diagnostics'
+    )
+
+    return LaunchDescription([
+        use_sim_time_arg,
+        run_mode_arg,
+        map_path_arg,
+        marker_size_arg,
+        enable_topic_debug_log_arg,
+        OpaqueFunction(function=launch_setup),
     ])

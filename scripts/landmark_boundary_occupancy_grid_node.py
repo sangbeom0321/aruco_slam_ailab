@@ -2,7 +2,7 @@
 """
 랜드마크 벽 테두리 Occupancy Grid 노드
 =====================================
-Localization 모드에서 landmarks_map.json의 id 0~9를 직선으로 연결하여
+Localization 모드에서 landmarks_map.json의 id 11~20을 직선으로 연결하여
 벽 테두리로 하는 2D occupancy grid를 발행합니다.
 
 발행 토픽:
@@ -57,7 +57,7 @@ class LandmarkBoundaryOccupancyGridNode(Node):
         self.declare_parameter('wall_thickness', 1)  # cells (벽 두께)
         self.declare_parameter('publish_rate', 0.5)  # Hz
         self.declare_parameter('local_map_size', 10.0)  # m (로봇 주변 윈도우 크기)
-        self.declare_parameter('boundary_id_order', [0, 1, 2, 3, 4, 5, 6, 7, 9, 8])  # 벽 연결 순서
+        self.declare_parameter('boundary_id_order', [11, 12, 13, 14, 15, 16, 17, 18, 20, 19])  # 벽 연결 순서
 
         map_path = self.get_parameter('map_path').get_parameter_value().string_value
         if not map_path:
@@ -77,8 +77,8 @@ class LandmarkBoundaryOccupancyGridNode(Node):
         self.boundary_id_order = self.get_parameter('boundary_id_order').get_parameter_value().integer_array_value
         self.landmarks_xy = self._load_landmarks_by_order(map_path)
         if not self.landmarks_xy:
-            self.get_logger().error('랜드마크 0~9를 로드할 수 없습니다. map_path=%s' % map_path)
-            raise ValueError('No landmarks 0-9 in map file')
+            self.get_logger().error('랜드마크 11~20을 로드할 수 없습니다. map_path=%s' % map_path)
+            raise ValueError('No landmarks 11-20 in map file')
 
         self.landmarks_all = self._load_all_landmarks(map_path)
 
@@ -207,7 +207,7 @@ class LandmarkBoundaryOccupancyGridNode(Node):
         return inside
 
     def _build_occupancy_grid(self) -> OccupancyGrid:
-        """랜드마크 0~9를 직선으로 연결한 벽 테두리 occupancy grid 생성."""
+        """랜드마크 11~20을 직선으로 연결한 벽 테두리 occupancy grid 생성."""
         if len(self.landmarks_xy) < 2:
             return None
 
