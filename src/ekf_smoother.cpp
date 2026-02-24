@@ -8,6 +8,9 @@
 
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
+#include <geometry_msgs/msg/transform_stamped.hpp>
+#include <tf2_ros/transform_broadcaster.h>
+#include <tf2/LinearMath/Quaternion.h>
 #include <gtsam/geometry/Pose3.h>
 #include <Eigen/Dense>
 #include <mutex>
@@ -33,21 +36,29 @@ public:
     rclcpp::Time lastImuOdomTime_{0, 0, RCL_ROS_TIME};
     bool hasLastImuOdom_ = false;
 
+    // Last published timestamp (prevent time regression)
+    rclcpp::Time lastPublishedTime_{0, 0, RCL_ROS_TIME};
+
     // Jump detection: velocity-based + absolute distance-based
     static constexpr double MAX_SPEED = 5.0;      // m/s
     static constexpr double MAX_ANG_VEL = 3.0;    // rad/s
     static constexpr double MAX_DELTA_TRANS = 0.5; // m — absolute max per single step
     static constexpr double MAX_DELTA_ROT = 1.0;   // rad — absolute max per single step
 
-    // Innovation gating: reject SLAM corrections that are too large
-    static constexpr double MAX_INNOVATION_TRANS = 0.5;  // m
-    static constexpr double MAX_INNOVATION_ROT = 0.5;    // rad
+    // Innovation gating: reject SLAM corrections that are too large (steady-state)
+    static constexpr double MAX_INNOVATION_TRANS = 5.0;  // m
+    static constexpr double MAX_INNOVATION_ROT = 2.0;    // rad
+    // Convergence: accept first N corrections unconditionally
+    // (ISAM2 warmup shifts pose significantly before EKF gets corrections)
+    static constexpr int CONVERGENCE_UPDATES = 10;
+    int updateCount_ = 0;
 
     // ROS interface
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr subImuOdom_;
     rclcpp::Subscription<aruco_sam_ailab::msg::OptimizedKeyframeState>::SharedPtr subSlamCorrection_;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdom_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubPath_;
+    std::unique_ptr<tf2_ros::TransformBroadcaster> tfBroadcaster_;
 
     nav_msgs::msg::Path path_;
     std::mutex mtx_;
@@ -92,6 +103,7 @@ public:
         // Publishers
         pubOdom_ = create_publisher<nav_msgs::msg::Odometry>("/ekf/odom", 200);
         pubPath_ = create_publisher<nav_msgs::msg::Path>("/ekf/path", 10);
+        tfBroadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
 
         RCLCPP_INFO(get_logger(),
                     "EKF Smoother initialized (Q_pos=%.3f, Q_rot=%.3f, R_pos=%.3f, R_rot=%.3f)",
@@ -111,15 +123,22 @@ public:
         gtsam::Pose3 errorPose = statePose_.between(measurement);
         Eigen::Matrix<double, N, 1> innovation = gtsam::Pose3::Logmap(errorPose);
 
-        // Innovation gating: reject corrections that are too large
-        // This prevents teleportation from outlier SLAM estimates
+        // Innovation gating: reject corrections that are too large (outlier protection)
+        // During convergence period, accept all corrections unconditionally
+        // (ISAM2 warmup causes large initial discrepancy with EKF state)
         double transInnovation = innovation.tail<3>().norm();
         double rotInnovation = innovation.head<3>().norm();
-        if (transInnovation > MAX_INNOVATION_TRANS || rotInnovation > MAX_INNOVATION_ROT) {
+        if (updateCount_ >= CONVERGENCE_UPDATES &&
+            (transInnovation > MAX_INNOVATION_TRANS || rotInnovation > MAX_INNOVATION_ROT)) {
             RCLCPP_WARN(get_logger(),
                 "[EKF] Large SLAM correction rejected: trans=%.3fm rot=%.3frad (max: %.1f/%.1f)",
                 transInnovation, rotInnovation, MAX_INNOVATION_TRANS, MAX_INNOVATION_ROT);
             return false;
+        }
+        if (updateCount_ < CONVERGENCE_UPDATES) {
+            RCLCPP_INFO(get_logger(),
+                "[EKF] Convergence %d/%d: trans=%.3fm rot=%.3frad (accepted)",
+                updateCount_ + 1, CONVERGENCE_UPDATES, transInnovation, rotInnovation);
         }
 
         // Kalman gain: K = P · (P + R)⁻¹
@@ -136,6 +155,7 @@ public:
 
         // Ensure symmetry
         P_ = (P_ + P_.transpose()) / 2.0;
+        updateCount_++;
         return true;
     }
 
@@ -235,27 +255,43 @@ public:
         publishState(msg->header.stamp);
     }
 
-    // ─── Publish smoothed odometry and path ───
+    // ─── Publish smoothed odometry, TF, and path ───
     void publishState(const rclcpp::Time& stamp) {
+        // Prevent time regression: SLAM corrections may arrive with older timestamps
+        // than the last IMU odom publish. Use max(stamp, lastPublished) to keep monotonic.
+        rclcpp::Time pubStamp = stamp;
+        if (lastPublishedTime_.nanoseconds() > 0 && stamp < lastPublishedTime_) {
+            pubStamp = lastPublishedTime_;
+        }
+        lastPublishedTime_ = pubStamp;
+
         nav_msgs::msg::Odometry odom;
-        odom.header.stamp = stamp;
-        odom.header.frame_id = mapFrame;
+        odom.header.stamp = pubStamp;
+        odom.header.frame_id = odomFrame;
         odom.child_frame_id = baseLinkFrame;
         odom.pose.pose = gtsamToPoseMsg(statePose_);
 
         // Fill covariance from P_ (GTSAM order: rot,trans → ROS order: trans,rot)
-        // ROS covariance: [x,y,z,roll,pitch,yaw] = 6x6
         for (int i = 0; i < 36; i++) odom.pose.covariance[i] = 0.0;
-        // Translation covariance (P_ indices 3,4,5 → ROS indices 0,1,2)
         odom.pose.covariance[0]  = P_(3, 3);  // x
         odom.pose.covariance[7]  = P_(4, 4);  // y
         odom.pose.covariance[14] = P_(5, 5);  // z
-        // Rotation covariance (P_ indices 0,1,2 → ROS indices 3,4,5)
         odom.pose.covariance[21] = P_(0, 0);  // roll
         odom.pose.covariance[28] = P_(1, 1);  // pitch
         odom.pose.covariance[35] = P_(2, 2);  // yaw
 
         pubOdom_->publish(odom);
+
+        // TF: odom → base_footprint
+        geometry_msgs::msg::TransformStamped t;
+        t.header.stamp = pubStamp;
+        t.header.frame_id = odomFrame;
+        t.child_frame_id = baseLinkFrame;
+        t.transform.translation.x = odom.pose.pose.position.x;
+        t.transform.translation.y = odom.pose.pose.position.y;
+        t.transform.translation.z = odom.pose.pose.position.z;
+        t.transform.rotation = odom.pose.pose.orientation;
+        tfBroadcaster_->sendTransform(t);
 
         // Path
         geometry_msgs::msg::PoseStamped ps;

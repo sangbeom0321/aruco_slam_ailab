@@ -35,8 +35,8 @@ namespace aruco_sam_ailab {
 
 class GraphOptimizer : public ParamServer {
 public:
-    // ═══ Mutexes (split for concurrency) ═══
-    // queueMtx_: protects IMU/odom queues (very fast, microseconds)
+    // ═══ Mutexes ═══
+    // queueMtx_: protects IMU queue (very fast, microseconds)
     // slamMtx_: protects ISAM2 + graph state (held ~100ms during optimization)
     // pendingMtx_: protects latest ArUco observation for timer
     // snapMtx_: protects SLAM snapshot for interpolation
@@ -55,16 +55,12 @@ public:
     gtsam::Pose3 currentEstimate_;
     gtsam::Vector3 currentVelocity_ = gtsam::Vector3::Zero();
     gtsam::imuBias::ConstantBias currentBias_;
-    gtsam::Pose3 lastOdomPose_;
     bool systemInitialized_ = false;
     int frameIdx_ = 0;
 
     // ═══ Keyframe Selection (guarded by slamMtx_) ═══
-    gtsam::Pose3 lastKeyframeOdomPose_;
     rclcpp::Time lastKeyframeTime_{0, 0, RCL_ROS_TIME};
     std::set<int> lastVisibleMarkers_;
-    double keyframeDistThresh_;
-    double keyframeAngleThresh_;
     double keyframeTimeThresh_;
 
     // ═══ Raw IMU queue (guarded by queueMtx_) ═══
@@ -73,29 +69,31 @@ public:
     boost::shared_ptr<gtsam::PreintegrationParams> imuParams_;
     gtsam::PreintegratedImuMeasurements* imuPreintegrator_ = nullptr;  // guarded by slamMtx_
 
-    // ═══ IMU Odom queue (guarded by queueMtx_) ═══
-    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr subImuOdom_;
-    std::deque<nav_msgs::msg::Odometry> imuOdomQueue_;
-
-    // ═══ Wheel Odometry queue (guarded by queueMtx_) ═══
+    // ═══ Wheel Odom queue (guarded by queueMtx_) ═══
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr subWheelOdom_;
     std::deque<nav_msgs::msg::Odometry> wheelOdomQueue_;
-    bool wheelOdomActive_ = false;
-    gtsam::Pose3 firstWheelOdomPose_;
-    bool firstWheelOdomReceived_ = false;
-    gtsam::Pose3 lastKfWheelRelPose_;  // guarded by slamMtx_
+    gtsam::noiseModel::Diagonal::shared_ptr wheelOdomNoise_;
+    gtsam::noiseModel::Diagonal::shared_ptr wheelOdomZeroNoise_;  // 정지 시 tight constraint
+
+    // Wheel odom delta 결과 (delta + 정지 여부)
+    struct WheelOdomResult {
+        gtsam::Pose3 delta;
+        bool isStationary;
+    };
 
     // ═══ Pending ArUco (guarded by pendingMtx_) ═══
     aruco_sam_ailab::msg::MarkerArray pendingMarkers_;  // already in base_link
-    gtsam::Pose3 pendingOdomPose_;
-    nav_msgs::msg::Odometry pendingOdom_;
     rclcpp::Time pendingStamp_{0, 0, RCL_ROS_TIME};
     bool pendingArucoValid_ = false;
 
     // ═══ SLAM Snapshot for interpolation (guarded by snapMtx_) ═══
     gtsam::Pose3 snapEstimate_;
-    gtsam::Pose3 snapKfOdomPose_;
     bool snapValid_ = false;
+
+    // ═══ Wheel Odom Repropagation (guarded by snapMtx_) ═══
+    gtsam::Pose3 slamPoseAtLastKF_;   // SLAM 보정 pose at last keyframe
+    gtsam::Pose3 odomPoseAtLastKF_;   // Wheel odom pose at last keyframe
+    bool wheelOdomRepropValid_ = false;
 
     // ═══ Landmarks (guarded by slamMtx_) ═══
     std::map<int, gtsam::Key> landmarkIdToKey_;
@@ -103,7 +101,6 @@ public:
     // ═══ ROS Interface ═══
     rclcpp::Subscription<aruco_sam_ailab::msg::MarkerArray>::SharedPtr subAruco_;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubGlobalOdom_;
-    rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubWheelOdomCorrection_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubPath_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pubLandmarks_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pubDebugMap_;
@@ -113,7 +110,7 @@ public:
     rclcpp::TimerBase::SharedPtr slamTimer_;
 
     // ═══ Callback Groups (enable true concurrency with MultiThreadedExecutor) ═══
-    rclcpp::CallbackGroup::SharedPtr queueCbGroup_;   // IMU/odom subscribers
+    rclcpp::CallbackGroup::SharedPtr queueCbGroup_;   // IMU subscriber
     rclcpp::CallbackGroup::SharedPtr arucoCbGroup_;    // ArUco subscriber (lightweight)
     rclcpp::CallbackGroup::SharedPtr timerCbGroup_;    // SLAM timer (heavy ISAM2)
 
@@ -122,16 +119,19 @@ public:
     std::string mapPath_;
     gtsam::noiseModel::Diagonal::shared_ptr fixedLandmarkNoise_;
 
-    nav_msgs::msg::Path globalPath_;  // only written by arucoHandler (arucoCbGroup_)
+    nav_msgs::msg::Path globalPath_;
+    nav_msgs::msg::Path correctedOdomPath_;
     std::unique_ptr<tf2_ros::TransformBroadcaster> tfBroadcaster_;
+
+    // ═══ Wheel Odom Repropagation Publishers ═══
+    rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubCorrectedOdom_;
+    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubCorrectedPath_;
 
     // ═══ Noise Models ═══
     gtsam::noiseModel::Diagonal::shared_ptr priorPoseNoise_;
     gtsam::noiseModel::Diagonal::shared_ptr priorVelNoise_;
     gtsam::noiseModel::Diagonal::shared_ptr priorBiasNoise_;
     gtsam::noiseModel::Diagonal::shared_ptr biasRandomWalkNoise_;
-    gtsam::noiseModel::Diagonal::shared_ptr odomFallbackNoise_;
-    gtsam::noiseModel::Diagonal::shared_ptr wheelOdomNoise_;
     gtsam::noiseModel::Diagonal::shared_ptr obsNoise_;
     gtsam::noiseModel::Diagonal::shared_ptr landmarkPriorNoise_;
 
@@ -152,16 +152,7 @@ public:
 
         // ─── 1. Subscribers ───
 
-        // 1a. IMU odom (for keyframe triggering & dead reckoning between keyframes)
-        subImuOdom_ = create_subscription<nav_msgs::msg::Odometry>(
-            odomTopic, 100,
-            [this](const nav_msgs::msg::Odometry::SharedPtr msg) {
-                std::lock_guard<std::mutex> lock(queueMtx_);
-                imuOdomQueue_.push_back(*msg);
-                if (imuOdomQueue_.size() > 200) imuOdomQueue_.pop_front();
-            }, queueSubOpts);
-
-        // 1b. Raw IMU (for ImuFactor preintegration in factor graph)
+        // 1a. Raw IMU (for ImuFactor preintegration in factor graph)
         subRawImu_ = create_subscription<sensor_msgs::msg::Imu>(
             imuTopic, rclcpp::SensorDataQoS(),
             [this](const sensor_msgs::msg::Imu::SharedPtr msg) {
@@ -185,25 +176,53 @@ public:
                 }
                 rawImuQueue_.push_back(imu_base);
                 if (rawImuQueue_.size() > 4000) rawImuQueue_.pop_front();
-            }, queueSubOpts);
 
-        // 1c. Wheel Odometry (optional — uses relative pose from first received)
-        subWheelOdom_ = create_subscription<nav_msgs::msg::Odometry>(
-            wheelOdomTopic, 100,
-            [this](const nav_msgs::msg::Odometry::SharedPtr msg) {
-                std::lock_guard<std::mutex> lock(queueMtx_);
-                if (!firstWheelOdomReceived_) {
-                    firstWheelOdomPose_ = poseMsgToGtsam(msg->pose.pose);
-                    firstWheelOdomReceived_ = true;
-                    wheelOdomActive_ = true;
-                    RCLCPP_INFO(get_logger(), "Wheel odom active on %s (using relative from first pose)",
-                                wheelOdomTopic.c_str());
+                // [DEBUG] base frame gyro 값 확인 (5초마다)
+                if (enableTopicDebugLog) {
+                    RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 5000,
+                        "[IMU raw→base] gyr=(%.5f, %.5f, %.5f) acc=(%.3f, %.3f, %.3f)",
+                        imu_base.angular_velocity.x, imu_base.angular_velocity.y, imu_base.angular_velocity.z,
+                        imu_base.linear_acceleration.x, imu_base.linear_acceleration.y, imu_base.linear_acceleration.z);
                 }
-                wheelOdomQueue_.push_back(*msg);
-                if (wheelOdomQueue_.size() > 200) wheelOdomQueue_.pop_front();
             }, queueSubOpts);
 
-        // 1d. ArUco (lightweight — never blocks on ISAM2)
+        // 1b. Wheel Odometry (for BetweenFactor + repropagation)
+        if (useWheelOdom) {
+            subWheelOdom_ = create_subscription<nav_msgs::msg::Odometry>(
+                wheelOdomTopic, rclcpp::SensorDataQoS(),
+                [this](const nav_msgs::msg::Odometry::SharedPtr msg) {
+                    // Queue에 push (BetweenFactor 용)
+                    {
+                        std::lock_guard<std::mutex> lock(queueMtx_);
+                        wheelOdomQueue_.push_back(*msg);
+                        if (wheelOdomQueue_.size() > 2000) wheelOdomQueue_.pop_front();
+                    }
+                    // Repropagation: SLAM 보정 pose 기준으로 연속 위치 발행
+                    {
+                        std::lock_guard<std::mutex> lock(snapMtx_);
+                        if (!wheelOdomRepropValid_) return;
+                        gtsam::Pose3 currentOdom = poseMsgToGtsam(msg->pose.pose);
+                        gtsam::Pose3 delta = odomPoseAtLastKF_.between(currentOdom);
+                        gtsam::Pose3 corrected = slamPoseAtLastKF_.compose(delta);
+
+                        nav_msgs::msg::Odometry out;
+                        out.header.stamp = msg->header.stamp;
+                        out.header.frame_id = odomFrame;
+                        out.child_frame_id = baseLinkFrame;
+                        out.pose.pose = gtsamToPoseMsg(corrected);
+                        pubCorrectedOdom_->publish(out);
+
+                        geometry_msgs::msg::PoseStamped ps;
+                        ps.header = out.header;
+                        ps.pose = out.pose.pose;
+                        correctedOdomPath_.header = out.header;
+                        correctedOdomPath_.poses.push_back(ps);
+                        pubCorrectedPath_->publish(correctedOdomPath_);
+                    }
+                }, queueSubOpts);
+        }
+
+        // 1c. ArUco (lightweight — never blocks on ISAM2)
         subAruco_ = create_subscription<aruco_sam_ailab::msg::MarkerArray>(
             arucoPosesTopic, 10,
             std::bind(&GraphOptimizer::arucoHandler, this, std::placeholders::_1),
@@ -211,11 +230,15 @@ public:
 
         // ─── 2. Publishers ───
         pubGlobalOdom_ = create_publisher<nav_msgs::msg::Odometry>("/aruco_slam/odom", 10);
-        pubWheelOdomCorrection_ = create_publisher<nav_msgs::msg::Odometry>("/odometry/wheel_odom_correction", 10);
         pubPath_ = create_publisher<nav_msgs::msg::Path>("/aruco_slam/path", 10);
         pubLandmarks_ = create_publisher<visualization_msgs::msg::MarkerArray>("/aruco_slam/landmarks", 10);
         pubDebugMap_ = create_publisher<visualization_msgs::msg::MarkerArray>("/aruco_slam/debug_markers", 10);
         pubOptimizedState_ = create_publisher<aruco_sam_ailab::msg::OptimizedKeyframeState>("/optimized_keyframe_state", 10);
+        if (useWheelOdom) {
+            pubCorrectedOdom_ = create_publisher<nav_msgs::msg::Odometry>("/aruco_slam/wheel_odom", 10);
+            pubCorrectedPath_ = create_publisher<nav_msgs::msg::Path>("/aruco_slam/wheel_odom_path", 10);
+            correctedOdomPath_.header.frame_id = odomFrame;
+        }
         tfBroadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
 
         // ─── 2.5. Service ───
@@ -237,11 +260,9 @@ public:
             (gtsam::Vector(6) << 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6).finished());
 
         // ─── 2.8. Keyframe params ───
-        keyframeDistThresh_ = keyframeDistanceThreshold;
-        keyframeAngleThresh_ = keyframeAngleThreshold;
         keyframeTimeThresh_ = keyframeTimeInterval;
-        RCLCPP_INFO(get_logger(), "Keyframe policy: dist=%.2fm, angle=%.2frad, time=%.2fs",
-                    keyframeDistThresh_, keyframeAngleThresh_, keyframeTimeThresh_);
+        RCLCPP_INFO(get_logger(), "Keyframe policy: time=%.2fs (marker-triggered + time fallback)",
+                    keyframeTimeThresh_);
 
         // ─── 3. ISAM2 ───
         gtsam::ISAM2Params params;
@@ -261,30 +282,49 @@ public:
         imuPreintegrator_ = new gtsam::PreintegratedImuMeasurements(imuParams_, currentBias_);
 
         // ─── 5. Noise Models ───
+        // GTSAM Pose3 tangent order: [rot_x(roll), rot_y(pitch), rot_z(yaw), trans_x, trans_y, trans_z]
+        // 2D UGV: roll/pitch/z ≈ const → tight, yaw/x/y → 자유도
         priorPoseNoise_ = gtsam::noiseModel::Diagonal::Sigmas(
             (gtsam::Vector(6) << 0.001, 0.001, 0.001, 0.001, 0.001, 0.001).finished());
+        // Localization: 초기 포즈가 ArUco 단일 관측에서 계산되므로 x/y/yaw 완화, roll/pitch/z tight (2D UGV)
+        if (isLocalizationMode_) {
+            priorPoseNoise_ = gtsam::noiseModel::Diagonal::Sigmas(
+                (gtsam::Vector(6) << 0.01, 0.01, 0.15, 0.10, 0.10, 0.01).finished());
+        }
         priorVelNoise_ = gtsam::noiseModel::Isotropic::Sigma(3, 0.1);
         priorBiasNoise_ = gtsam::noiseModel::Isotropic::Sigma(6, 0.1);  // 초기 bias 불확실성 허용
 
-        // Bias random walk: σ_continuous * √(dt_keyframe) ≈ 0.0001*√0.5 is too tight
-        // Scale up 100x to allow graph to actually correct bias
+        // Bias random walk: acc/gyro 분리 스케일링
+        // Acc bias 100x: accelerometer 드리프트가 크므로 bias 보정 허용
+        // Gyro bias 10x: gyro bias를 안정적으로 유지 → 실제 회전이 bias로 흡수되는 것 방지
+        //   (100x일 때 optimizer가 회전을 bias 변화로 설명 → heading 실시간성 저하)
         biasRandomWalkNoise_ = gtsam::noiseModel::Diagonal::Sigmas(
             (gtsam::Vector(6) << imuAccBiasN * 100, imuAccBiasN * 100, imuAccBiasN * 100,
-                                  imuGyrBiasN * 100, imuGyrBiasN * 100, imuGyrBiasN * 100).finished());
+                                  imuGyrBiasN * 10, imuGyrBiasN * 10, imuGyrBiasN * 10).finished());
 
-        odomFallbackNoise_ = gtsam::noiseModel::Diagonal::Sigmas(
-            (gtsam::Vector(6) << 0.1, 0.1, 0.1, 0.1, 0.1, 0.1).finished());
-
-        wheelOdomNoise_ = gtsam::noiseModel::Diagonal::Sigmas(
-            (gtsam::Vector(6) << wheelOdomRotNoise, wheelOdomRotNoise, wheelOdomRotNoise,
-                                  wheelOdomTransNoise, wheelOdomTransNoise, wheelOdomTransNoise).finished());
-
+        // ArUco obsNoise: 2D UGV → roll/pitch/z는 예측 가능 (tight), yaw/x/y는 config 값 사용
+        // roll/pitch: 로봇 flat + 마커 벽 고정 → 상대 자세 안정적
+        // z: 로봇 높이 고정 + 마커 높이 고정 → 높이차 안정적
         obsNoise_ = gtsam::noiseModel::Diagonal::Sigmas(
-            (gtsam::Vector(6) << arucoRotNoise, arucoRotNoise, arucoRotNoise,
-                                  arucoTransNoise, arucoTransNoise, arucoTransNoise).finished());
-        // Landmark prior: 관측 noise와 비슷한 수준으로 조여서 초기 수렴 안정화
+            (gtsam::Vector(6) << 0.05, 0.05, arucoRotNoise,
+                                  arucoTransNoise, arucoTransNoise, 0.03).finished());
+        // Landmark prior: 2D UGV → 랜드마크 높이/기울기는 신뢰, x/y/yaw는 관측 noise 수준
         landmarkPriorNoise_ = gtsam::noiseModel::Diagonal::Sigmas(
-            (gtsam::Vector(6) << 0.15, 0.15, 0.15, 0.15, 0.15, 0.15).finished());
+            (gtsam::Vector(6) << 0.05, 0.05, 0.15, 0.15, 0.15, 0.05).finished());
+
+        // Wheel odom noise: GTSAM Pose3 tangent order [rot_x, rot_y, rot_z, trans_x, trans_y, trans_z]
+        if (useWheelOdom) {
+            wheelOdomNoise_ = gtsam::noiseModel::Diagonal::Sigmas(
+                (gtsam::Vector(6) << wheelOdomNoiseRoll, wheelOdomNoisePitch, wheelOdomNoiseYaw,
+                                      wheelOdomNoiseX, wheelOdomNoiseY, wheelOdomNoiseZ).finished());
+            // 정지 시 zero-motion constraint: 모든 축 매우 tight
+            wheelOdomZeroNoise_ = gtsam::noiseModel::Diagonal::Sigmas(
+                (gtsam::Vector(6) << 0.001, 0.001, 0.001, 0.001, 0.001, 0.001).finished());
+            RCLCPP_INFO(get_logger(), "Wheel odom enabled: topic=%s noise=[%.2f,%.2f,%.2f | %.2f,%.2f,%.2f]",
+                        wheelOdomTopic.c_str(),
+                        wheelOdomNoiseRoll, wheelOdomNoisePitch, wheelOdomNoiseYaw,
+                        wheelOdomNoiseX, wheelOdomNoiseY, wheelOdomNoiseZ);
+        }
 
         // ─── 6. Extrinsic (Color camera for ArUco) ───
         gtsam::Rot3 rot(extRotBaseCam);
@@ -316,7 +356,7 @@ public:
     // ═══════════════════════════════════════════════════════════
     //  ArUco Callback (lightweight — never blocks on ISAM2)
     //  Runs at camera rate (~30Hz). Stores pending data for timer.
-    //  Always publishes interpolated SLAM pose for EKF correction.
+    //  Publishes last SLAM estimate for EKF correction.
     // ═══════════════════════════════════════════════════════════
     void arucoHandler(const aruco_sam_ailab::msg::MarkerArray::SharedPtr msg) {
         // 1. Transform markers to base_link (lock-free, baseToCam_ is const)
@@ -330,42 +370,26 @@ public:
             markersInBase.markers.push_back(newMarker);
         }
 
-        // 2. Sync IMU odom (locks queueMtx_ internally, fast)
-        nav_msgs::msg::Odometry currOdom;
-        if (!getSyncedOdom(msg->header.stamp, currOdom)) {
-            RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "Waiting for IMU Odometry...");
-            return;
-        }
-        gtsam::Pose3 currOdomPose = poseMsgToGtsam(currOdom.pose.pose);
-
-        // 3. Store latest observation for SLAM timer (only when markers detected)
+        // 2. Store latest observation for SLAM timer (only when markers detected)
         if (!markersInBase.markers.empty()) {
             std::lock_guard<std::mutex> lock(pendingMtx_);
             pendingMarkers_ = markersInBase;
-            pendingOdomPose_ = currOdomPose;
-            pendingOdom_ = currOdom;
             pendingStamp_ = msg->header.stamp;
             pendingArucoValid_ = true;
         }
 
-        // 4. Publish interpolated SLAM pose (~30Hz, even during ISAM2)
-        gtsam::Pose3 snapEst;
-        gtsam::Pose3 snapKfOdom;
-        bool valid;
+        // 3. Publish last SLAM estimate (~30Hz)
         {
-            std::lock_guard<std::mutex> lock(snapMtx_);
-            snapEst = snapEstimate_;
-            snapKfOdom = snapKfOdomPose_;
-            valid = snapValid_;
-        }
-
-        if (valid) {
-            gtsam::Pose3 odomDelta = snapKfOdom.between(currOdomPose);
-            gtsam::Pose3 interpolated = snapEst.compose(odomDelta);
-            // TF + path + odom
-            publishTFOnly(interpolated, msg->header.stamp, currOdomPose);
-            // EKF correction (~30Hz instead of sporadic keyframe rate)
-            publishCorrection(interpolated, msg->header.stamp);
+            gtsam::Pose3 snapEst;
+            bool valid;
+            {
+                std::lock_guard<std::mutex> lock(snapMtx_);
+                snapEst = snapEstimate_;
+                valid = snapValid_;
+            }
+            if (valid) {
+                publishSlamPose(snapEst, msg->header.stamp);
+            }
         }
     }
 
@@ -377,16 +401,12 @@ public:
     void slamTimerCallback() {
         // 1. Check for pending ArUco data
         aruco_sam_ailab::msg::MarkerArray markers;
-        gtsam::Pose3 odomPose;
-        nav_msgs::msg::Odometry odom;
         rclcpp::Time stamp(0, 0, RCL_ROS_TIME);
         bool hasPending = false;
         {
             std::lock_guard<std::mutex> lock(pendingMtx_);
             if (pendingArucoValid_) {
                 markers = pendingMarkers_;
-                odomPose = pendingOdomPose_;
-                odom = pendingOdom_;
                 stamp = pendingStamp_;
                 hasPending = true;
                 pendingArucoValid_ = false;
@@ -403,7 +423,19 @@ public:
         for (const auto& m : markers.markers) currMarkerIds.push_back(m.id);
 
         // 4. System initialization
+        //    시퀀스: [1] IMU 대기 → [2] ArUco 첫 최적화 → 초기화
+        //    초기화 후에만 IMU 적분 + keyframe 최적화 시작
         if (!systemInitialized_) {
+            // ── 센서 데이터 준비 확인 (IMU 필요) ──
+            {
+                std::lock_guard<std::mutex> qlock(queueMtx_);
+                if (rawImuQueue_.size() < 50) {
+                    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+                        "[Init 1/2] Waiting for IMU data (%zu/50 samples)...", rawImuQueue_.size());
+                    return;
+                }
+            }
+            // [Init 2/2] ArUco 마커 기반 초기화
             if (isLocalizationMode_) {
                 for (const auto& m : markers.markers) {
                     if (landmarkIdToKey_.count(static_cast<int>(m.id))) {
@@ -411,7 +443,7 @@ public:
                         gtsam::Pose3 L_map = isam_.calculateEstimate().at<gtsam::Pose3>(L(mid));
                         gtsam::Pose3 L_base = poseMsgToGtsam(m.pose);
                         gtsam::Pose3 initialPose = L_map.compose(L_base.inverse());
-                        initializeSystemAt(initialPose, odom);
+                        initializeSystemAt(initialPose, stamp);
                         lastVisibleMarkers_.clear();
                         for (const auto& mk : markers.markers) lastVisibleMarkers_.insert(mk.id);
                         addLandmarkFactors(0, markers);
@@ -438,16 +470,15 @@ public:
                         "Mapping: Waiting for ArUco markers to initialize...");
                     return;
                 }
-                initializeSystem(markers, odom);
+                initializeSystem(markers, stamp);
                 updateSnapshot();
                 return;
             }
         }
 
         // 5. Keyframe decision + ISAM2 optimization
-        if (needNewKeyframe(odomPose, stamp, currMarkerIds)) {
-            processKeyframe(markers, odomPose, stamp);
-            lastKeyframeOdomPose_ = odomPose;
+        if (needNewKeyframe(stamp, currMarkerIds)) {
+            processKeyframe(markers, stamp);
             lastKeyframeTime_ = stamp;
             lastVisibleMarkers_.clear();
             for (int id : currMarkerIds) lastVisibleMarkers_.insert(id);
@@ -461,7 +492,6 @@ public:
     void updateSnapshot() {
         std::lock_guard<std::mutex> lock(snapMtx_);
         snapEstimate_ = currentEstimate_;
-        snapKfOdomPose_ = lastKeyframeOdomPose_;
         snapValid_ = true;
     }
 
@@ -503,31 +533,75 @@ public:
     }
 
     // ═══════════════════════════════════════════════════════════
-    //  Wheel Odometry Sync (locks queueMtx_ internally)
+    //  Wheel Odometry Delta (pose-differencing)
+    //  (locks queueMtx_ internally)
     // ═══════════════════════════════════════════════════════════
-    bool getSyncedWheelOdom(const rclcpp::Time& stamp, gtsam::Pose3& relPose) {
+    std::optional<WheelOdomResult> computeWheelOdomDelta(const rclcpp::Time& fromTime, const rclcpp::Time& toTime) {
         std::lock_guard<std::mutex> lock(queueMtx_);
 
-        if (!wheelOdomActive_ || wheelOdomQueue_.empty()) return false;
+        if (wheelOdomQueue_.empty()) return std::nullopt;
 
-        double minDiff = std::numeric_limits<double>::max();
-        size_t bestIdx = 0;
-        for (size_t i = 0; i < wheelOdomQueue_.size(); ++i) {
-            double diff = std::abs((rclcpp::Time(wheelOdomQueue_[i].header.stamp) - stamp).seconds());
-            if (diff < minDiff) { minDiff = diff; bestIdx = i; }
+        double fromSec = fromTime.seconds();
+        double toSec = toTime.seconds();
+        constexpr double TOLERANCE = 0.1;  // 100ms
+
+        // fromTime에 가장 가까운 odom 메시지 검색
+        const nav_msgs::msg::Odometry* bestFrom = nullptr;
+        double bestFromDt = TOLERANCE;
+        const nav_msgs::msg::Odometry* bestTo = nullptr;
+        double bestToDt = TOLERANCE;
+
+        for (const auto& odom : wheelOdomQueue_) {
+            double t = stamp2Sec(odom.header.stamp);
+            double dtFrom = std::abs(t - fromSec);
+            double dtTo = std::abs(t - toSec);
+            if (dtFrom < bestFromDt) { bestFrom = &odom; bestFromDt = dtFrom; }
+            if (dtTo < bestToDt) { bestTo = &odom; bestToDt = dtTo; }
         }
-        if (minDiff > 0.5) return false;
 
-        gtsam::Pose3 absPose = poseMsgToGtsam(wheelOdomQueue_[bestIdx].pose.pose);
-        relPose = firstWheelOdomPose_.between(absPose);
-        return true;
+        if (!bestFrom || !bestTo || bestFrom == bestTo) return std::nullopt;
+
+        // 정지 감지: fromTime~toTime 구간 내 모든 odom의 twist.linear 속도 체크
+        constexpr double ZERO_VEL_THRESH = 0.01;  // m/s — 이하면 정지로 판단
+        bool allStationary = true;
+        for (const auto& odom : wheelOdomQueue_) {
+            double t = stamp2Sec(odom.header.stamp);
+            if (t < fromSec - 0.05 || t > toSec + 0.05) continue;
+            double vx = odom.twist.twist.linear.x;
+            double vy = odom.twist.twist.linear.y;
+            double speed = std::sqrt(vx * vx + vy * vy);
+            if (speed > ZERO_VEL_THRESH) {
+                allStationary = false;
+                break;
+            }
+        }
+
+        // Pose differencing: delta = poseFrom.between(poseTo)
+        gtsam::Pose3 poseFrom = poseMsgToGtsam(bestFrom->pose.pose);
+        gtsam::Pose3 poseTo = poseMsgToGtsam(bestTo->pose.pose);
+        gtsam::Pose3 delta = poseFrom.between(poseTo);
+
+        // Sanity check: >3m 이동이면 odom reset으로 판단하여 reject
+        double dist = delta.translation().norm();
+        double dt = toSec - fromSec;
+        if (dt > 0 && dist / dt > 3.0) {
+            RCLCPP_WARN(get_logger(), "Wheel odom delta rejected: %.2fm in %.2fs (%.1fm/s)", dist, dt, dist / dt);
+            return std::nullopt;
+        }
+
+        // 오래된 데이터 정리 (fromTime 0.5초 이전 제거)
+        double cutoff = fromSec - 0.5;
+        while (!wheelOdomQueue_.empty() && stamp2Sec(wheelOdomQueue_.front().header.stamp) < cutoff) {
+            wheelOdomQueue_.pop_front();
+        }
+
+        return WheelOdomResult{allStationary ? gtsam::Pose3() : delta, allStationary};
     }
 
     // ═══════════════════════════════════════════════════════════
-    //  Keyframe Policy
+    //  Keyframe Policy (marker-triggered + time fallback)
     // ═══════════════════════════════════════════════════════════
-    bool needNewKeyframe(const gtsam::Pose3& currOdomPose, const rclcpp::Time& currTime,
-                         const std::vector<int>& currMarkerIds) {
+    bool needNewKeyframe(const rclcpp::Time& currTime, const std::vector<int>& currMarkerIds) {
         if (frameIdx_ == 0) return true;
 
         double timeDiff = (currTime - lastKeyframeTime_).seconds();
@@ -538,11 +612,6 @@ public:
 
         if (hasMarkers) return true;
 
-        gtsam::Pose3 delta = lastKeyframeOdomPose_.between(currOdomPose);
-        if (delta.translation().norm() > keyframeDistThresh_) return true;
-        double rotAngle = std::abs(delta.rotation().axisAngle().second);
-        if (rotAngle > keyframeAngleThresh_) return true;
-
         if (timeDiff > keyframeTimeThresh_) return true;
 
         return false;
@@ -551,8 +620,8 @@ public:
     // ═══════════════════════════════════════════════════════════
     //  Initialization
     // ═══════════════════════════════════════════════════════════
-    void initializeSystem(const aruco_sam_ailab::msg::MarkerArray& markers, const nav_msgs::msg::Odometry& odom) {
-        initializeSystemAt(gtsam::Pose3(), odom);
+    void initializeSystem(const aruco_sam_ailab::msg::MarkerArray& markers, const rclcpp::Time& stamp) {
+        initializeSystemAt(gtsam::Pose3(), stamp);
         lastVisibleMarkers_.clear();
         for (const auto& m : markers.markers) lastVisibleMarkers_.insert(m.id);
         addLandmarkFactors(0, markers);
@@ -620,12 +689,10 @@ public:
                                   gyrBias.x(), gyrBias.y(), gyrBias.z()).finished());
     }
 
-    void initializeSystemAt(const gtsam::Pose3& startPose, const nav_msgs::msg::Odometry& odom) {
+    void initializeSystemAt(const gtsam::Pose3& startPose, const rclcpp::Time& stamp) {
         currentEstimate_ = startPose;
         currentVelocity_ = gtsam::Vector3::Zero();
-        lastOdomPose_ = poseMsgToGtsam(odom.pose.pose);
-        lastKeyframeOdomPose_ = lastOdomPose_;
-        lastKeyframeTime_ = odom.header.stamp;
+        lastKeyframeTime_ = stamp;
         lastVisibleMarkers_.clear();
 
         // Compute initial bias from buffered stationary IMU data
@@ -644,39 +711,42 @@ public:
         graphValues_.insert(B(0), currentBias_);
         graphFactors_.add(gtsam::PriorFactor<gtsam::imuBias::ConstantBias>(B(0), currentBias_, priorBiasNoise_));
 
-        // Initialize wheel odom reference if available
-        if (wheelOdomActive_) {
-            gtsam::Pose3 wheelRel;
-            if (getSyncedWheelOdom(odom.header.stamp, wheelRel)) {
-                lastKfWheelRelPose_ = wheelRel;
-            }
-        }
-
         systemInitialized_ = true;
         frameIdx_ = 0;
 
-        imuPreintegrator_->resetIntegrationAndSetBias(currentBias_);
+        // IMU + Wheel Odom 큐 정리: 초기화 시점 이전 데이터 제거
+        {
+            std::lock_guard<std::mutex> lock(queueMtx_);
+            double initTime = stamp.seconds();
+            while (!rawImuQueue_.empty() && stamp2Sec(rawImuQueue_.front().header.stamp) < initTime - 0.1) {
+                rawImuQueue_.pop_front();
+            }
+            while (!wheelOdomQueue_.empty() && stamp2Sec(wheelOdomQueue_.front().header.stamp) < initTime - 0.1) {
+                wheelOdomQueue_.pop_front();
+            }
+            RCLCPP_INFO(get_logger(), "[Init] Queue trimmed: IMU=%zu, WheelOdom=%zu",
+                        rawImuQueue_.size(), wheelOdomQueue_.size());
+        }
 
-        publishMapToOdomTF(currentEstimate_, lastOdomPose_, odom.header.stamp);
-        publishCorrection(currentEstimate_, odom.header.stamp);
+        imuPreintegrator_->resetIntegrationAndSetBias(currentBias_);
 
         RCLCPP_INFO(get_logger(), "System Initialized at pose (%.2f, %.2f, %.2f)",
                     startPose.translation().x(), startPose.translation().y(), startPose.translation().z());
     }
 
     // ═══════════════════════════════════════════════════════════
-    //  Process Keyframe (ImuFactor + optional WheelOdom + ArUco)
+    //  Process Keyframe (ImuFactor + ArUco)
     //  Called from slamTimerCallback under slamMtx_
     // ═══════════════════════════════════════════════════════════
     void processKeyframe(const aruco_sam_ailab::msg::MarkerArray& markers,
-                         const gtsam::Pose3& currOdomPose, const rclcpp::Time& stamp) {
+                         const rclcpp::Time& stamp) {
         frameIdx_++;
 
         // 1. IMU Preintegration: lastKeyframeTime_ → stamp
         //    (locks queueMtx_ internally)
         int imuCount = preintegrateImu(lastKeyframeTime_, stamp);
 
-        // 2. Predict state using IMU or odom fallback
+        // 2. Predict state using IMU
         gtsam::Pose3 predictedPose;
         gtsam::Vector3 predictedVel;
 
@@ -685,13 +755,24 @@ public:
             gtsam::NavState predictedState = imuPreintegrator_->predict(prevNavState, currentBias_);
             predictedPose = predictedState.pose();
             predictedVel = predictedState.velocity();
+
+            // [DEBUG] IMU preintegration 결과 확인
+            double prevYaw = currentEstimate_.rotation().yaw();
+            double predYaw = predictedPose.rotation().yaw();
+            auto deltaR = imuPreintegrator_->deltaRij();
+            RCLCPP_INFO(get_logger(),
+                "[IMU DEBUG] %d samples | deltaRot(r=%.4f p=%.4f y=%.4f) | prevYaw=%.3f predYaw=%.3f dYaw=%.4f rad (%.1f deg)"
+                " | gyrBias=(%.5f,%.5f,%.5f)",
+                imuCount,
+                deltaR.roll(), deltaR.pitch(), deltaR.yaw(),
+                prevYaw, predYaw, predYaw - prevYaw, (predYaw - prevYaw) * 180.0 / M_PI,
+                currentBias_.gyroscope().x(), currentBias_.gyroscope().y(), currentBias_.gyroscope().z());
         } else {
-            // Fallback: use odom delta
-            gtsam::Pose3 odomDelta = lastKeyframeOdomPose_.between(currOdomPose);
-            predictedPose = currentEstimate_.compose(odomDelta);
+            // No IMU — identity motion (정지 가정)
+            predictedPose = currentEstimate_;
             predictedVel = currentVelocity_;
             RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
-                "No IMU data for preintegration, using odom fallback");
+                "No IMU data for preintegration, using identity motion");
         }
 
         // 3. Insert new variables
@@ -699,17 +780,49 @@ public:
         graphValues_.insert(V(frameIdx_), predictedVel);
         graphValues_.insert(B(frameIdx_), currentBias_);
 
-        // 4. ImuFactor or fallback BetweenFactor
+        // 4. ImuFactor or identity/wheel-odom fallback
+        //    Wheel odom delta 계산 (queueMtx_ lock 내부)
+        std::optional<WheelOdomResult> wheelResult;
+        if (useWheelOdom) {
+            wheelResult = computeWheelOdomDelta(lastKeyframeTime_, stamp);
+        }
+
         if (imuCount > 0) {
             graphFactors_.add(gtsam::ImuFactor(
                 X(frameIdx_ - 1), V(frameIdx_ - 1),
                 X(frameIdx_), V(frameIdx_),
                 B(frameIdx_ - 1),
                 *imuPreintegrator_));
-        } else {
-            gtsam::Pose3 odomDelta = lastKeyframeOdomPose_.between(currOdomPose);
+
+            // Wheel odom: IMU와 함께 추가 제약으로 삽입
+            if (wheelResult.has_value()) {
+                auto& noise = wheelResult->isStationary ? wheelOdomZeroNoise_ : wheelOdomNoise_;
+                graphFactors_.add(gtsam::BetweenFactor<gtsam::Pose3>(
+                    X(frameIdx_ - 1), X(frameIdx_), wheelResult->delta, noise));
+                if (enableTopicDebugLog) {
+                    RCLCPP_INFO(get_logger(), "[WheelOdom] BetweenFactor added (w/ IMU)%s: dx=%.3f dy=%.3f dyaw=%.3f",
+                                wheelResult->isStationary ? " [STATIONARY]" : "",
+                                wheelResult->delta.translation().x(), wheelResult->delta.translation().y(),
+                                wheelResult->delta.rotation().yaw());
+                }
+            }
+        } else if (wheelResult.has_value()) {
+            // IMU 없음 — wheel odom을 identity fallback 대신 사용
+            auto& noise = wheelResult->isStationary ? wheelOdomZeroNoise_ : wheelOdomNoise_;
             graphFactors_.add(gtsam::BetweenFactor<gtsam::Pose3>(
-                X(frameIdx_ - 1), X(frameIdx_), odomDelta, odomFallbackNoise_));
+                X(frameIdx_ - 1), X(frameIdx_), wheelResult->delta, noise));
+            RCLCPP_INFO(get_logger(), "[WheelOdom] BetweenFactor replacing identity fallback%s: dx=%.3f dy=%.3f",
+                        wheelResult->isStationary ? " [STATIONARY]" : "",
+                        wheelResult->delta.translation().x(), wheelResult->delta.translation().y());
+        } else {
+            // 둘 다 없음 — identity fallback (그래프 under-constrained 방지)
+            // 2D UGV: roll/pitch/z tight, yaw/x/y loose
+            graphFactors_.add(gtsam::BetweenFactor<gtsam::Pose3>(
+                X(frameIdx_ - 1), X(frameIdx_), gtsam::Pose3(),
+                gtsam::noiseModel::Diagonal::Sigmas(
+                    (gtsam::Vector(6) << 0.01, 0.01, 0.1, 0.1, 0.1, 0.01).finished())));
+            RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+                "No IMU and no wheel odom, using identity motion fallback");
         }
 
         // 5. Bias random walk constraint
@@ -718,21 +831,10 @@ public:
             gtsam::imuBias::ConstantBias(),
             biasRandomWalkNoise_));
 
-        // 6. Wheel Odometry BetweenFactor (optional, locks queueMtx_ internally)
-        if (wheelOdomActive_) {
-            gtsam::Pose3 currWheelRel;
-            if (getSyncedWheelOdom(stamp, currWheelRel)) {
-                gtsam::Pose3 wheelDelta = lastKfWheelRelPose_.between(currWheelRel);
-                graphFactors_.add(gtsam::BetweenFactor<gtsam::Pose3>(
-                    X(frameIdx_ - 1), X(frameIdx_), wheelDelta, wheelOdomNoise_));
-                lastKfWheelRelPose_ = currWheelRel;
-            }
-        }
-
-        // 7. Landmark factors
+        // 6. Landmark factors
         addLandmarkFactors(frameIdx_, markers);
 
-        // 8. Optimize
+        // 7. Optimize
         try {
             isam_.update(graphFactors_, graphValues_);
             graphFactors_.resize(0);
@@ -745,6 +847,32 @@ public:
 
             // Reset preintegrator with updated bias
             imuPreintegrator_->resetIntegrationAndSetBias(currentBias_);
+
+            // Wheel odom repropagation reference 업데이트
+            if (useWheelOdom) {
+                // 현재 keyframe 시점에 가장 가까운 odom pose 찾기
+                gtsam::Pose3 odomAtKF;
+                bool foundOdom = false;
+                {
+                    std::lock_guard<std::mutex> qlock(queueMtx_);
+                    double stampSec = stamp.seconds();
+                    double bestDt = 0.2;
+                    for (const auto& odom : wheelOdomQueue_) {
+                        double dt = std::abs(stamp2Sec(odom.header.stamp) - stampSec);
+                        if (dt < bestDt) {
+                            bestDt = dt;
+                            odomAtKF = poseMsgToGtsam(odom.pose.pose);
+                            foundOdom = true;
+                        }
+                    }
+                }
+                if (foundOdom) {
+                    std::lock_guard<std::mutex> slock(snapMtx_);
+                    slamPoseAtLastKF_ = currentEstimate_;
+                    odomPoseAtLastKF_ = odomAtKF;
+                    wheelOdomRepropValid_ = true;
+                }
+            }
 
             // Publish landmarks (visualization)
             publishLandmarks(stamp);
@@ -759,38 +887,28 @@ public:
                             frameIdx_, WARMUP_FRAMES);
             }
 
+            RCLCPP_INFO(get_logger(),
+                "[ISAM2] frame=%d pos=(%.3f,%.3f) yaw=%.2f imu=%d markers=%zu",
+                frameIdx_,
+                currentEstimate_.translation().x(), currentEstimate_.translation().y(),
+                currentEstimate_.rotation().yaw(), imuCount, markers.markers.size());
             if (enableTopicDebugLog) {
                 RCLCPP_INFO(get_logger(),
-                    "[ISAM2] frame=%d imu=%d vel=(%.2f,%.2f,%.2f) bias_acc=(%.4f,%.4f,%.4f) bias_gyr=(%.5f,%.5f,%.5f)",
-                    frameIdx_, imuCount,
+                    "[ISAM2]   vel=(%.2f,%.2f,%.2f) bias_acc=(%.4f,%.4f,%.4f) bias_gyr=(%.5f,%.5f,%.5f)",
                     currentVelocity_.x(), currentVelocity_.y(), currentVelocity_.z(),
                     currentBias_.accelerometer().x(), currentBias_.accelerometer().y(), currentBias_.accelerometer().z(),
                     currentBias_.gyroscope().x(), currentBias_.gyroscope().y(), currentBias_.gyroscope().z());
             }
         } catch (const std::exception& e) {
             RCLCPP_ERROR(get_logger(), "ISAM2 Update Failed: %s", e.what());
+            graphFactors_.resize(0);
+            graphValues_.clear();
         }
     }
 
     // ═══════════════════════════════════════════════════════════
     //  Publishers
     // ═══════════════════════════════════════════════════════════
-    void publishCorrection(const gtsam::Pose3& optimizedPose, const rclcpp::Time& stamp) {
-        nav_msgs::msg::Odometry correctionMsg;
-        correctionMsg.header.stamp = stamp;
-        correctionMsg.header.frame_id = mapFrame;
-        correctionMsg.child_frame_id = baseLinkFrame;
-        correctionMsg.pose.pose = gtsamToPoseMsg(optimizedPose);
-        for (int i = 0; i < 36; i++) correctionMsg.pose.covariance[i] = 0.0;
-        correctionMsg.pose.covariance[0] = 0.01;
-        correctionMsg.pose.covariance[7] = 0.01;
-        correctionMsg.pose.covariance[14] = 0.01;
-        correctionMsg.pose.covariance[21] = 0.01;
-        correctionMsg.pose.covariance[28] = 0.01;
-        correctionMsg.pose.covariance[35] = 0.01;
-        pubWheelOdomCorrection_->publish(correctionMsg);
-    }
-
     void publishOptimizedKeyframeState(const gtsam::Pose3& optimizedPose, const rclcpp::Time& stamp) {
         aruco_sam_ailab::msg::OptimizedKeyframeState msg;
         msg.header.stamp = stamp;
@@ -807,26 +925,7 @@ public:
         pubOptimizedState_->publish(msg);
     }
 
-    void publishMapToOdomTF(const gtsam::Pose3& mapToBase, const gtsam::Pose3& odomToBase, const rclcpp::Time& stamp) {
-        gtsam::Pose3 mapToOdom = mapToBase.compose(odomToBase.inverse());
-        geometry_msgs::msg::TransformStamped t;
-        t.header.stamp = stamp;
-        t.header.frame_id = mapFrame;
-        t.child_frame_id = odomFrame;
-        t.transform.translation.x = mapToOdom.translation().x();
-        t.transform.translation.y = mapToOdom.translation().y();
-        t.transform.translation.z = mapToOdom.translation().z();
-        auto q = mapToOdom.rotation().toQuaternion();
-        t.transform.rotation.w = q.w();
-        t.transform.rotation.x = q.x();
-        t.transform.rotation.y = q.y();
-        t.transform.rotation.z = q.z();
-        tfBroadcaster_->sendTransform(t);
-    }
-
-    void publishTFOnly(const gtsam::Pose3& estimatedPose, const rclcpp::Time& stamp,
-                      const gtsam::Pose3& odomToBase) {
-        publishMapToOdomTF(estimatedPose, odomToBase, stamp);
+    void publishSlamPose(const gtsam::Pose3& estimatedPose, const rclcpp::Time& stamp) {
         geometry_msgs::msg::PoseStamped p;
         p.header.stamp = stamp;
         p.header.frame_id = mapFrame;
@@ -881,23 +980,6 @@ public:
     // ═══════════════════════════════════════════════════════════
     //  Helpers
     // ═══════════════════════════════════════════════════════════
-
-    // getSyncedOdom: locks queueMtx_ internally
-    bool getSyncedOdom(const rclcpp::Time& stamp, nav_msgs::msg::Odometry& result) {
-        std::lock_guard<std::mutex> lock(queueMtx_);
-
-        if (imuOdomQueue_.empty()) return false;
-        double minDiff = std::numeric_limits<double>::max();
-        size_t bestIdx = 0;
-        for (size_t i = 0; i < imuOdomQueue_.size(); ++i) {
-            double diff = std::abs((rclcpp::Time(imuOdomQueue_[i].header.stamp) - stamp).seconds());
-            if (diff < minDiff) { minDiff = diff; bestIdx = i; }
-        }
-        if (minDiff > 0.5) return false;
-        result = imuOdomQueue_[bestIdx];
-        return true;
-    }
-
     void publishLandmarks(const rclcpp::Time& stamp) {
         visualization_msgs::msg::MarkerArray arr;
         if (landmarkIdToKey_.empty()) { pubLandmarks_->publish(arr); return; }

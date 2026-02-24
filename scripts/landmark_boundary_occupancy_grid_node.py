@@ -57,6 +57,7 @@ class LandmarkBoundaryOccupancyGridNode(Node):
         self.declare_parameter('wall_thickness', 1)  # cells (벽 두께)
         self.declare_parameter('publish_rate', 0.5)  # Hz
         self.declare_parameter('local_map_size', 10.0)  # m (로봇 주변 윈도우 크기)
+        self.declare_parameter('boundary_id_order', [0, 1, 2, 3, 4, 5, 6, 7, 9, 8])  # 벽 연결 순서
 
         map_path = self.get_parameter('map_path').get_parameter_value().string_value
         if not map_path:
@@ -73,7 +74,8 @@ class LandmarkBoundaryOccupancyGridNode(Node):
         self.local_map_size = self.get_parameter('local_map_size').get_parameter_value().double_value
         publish_rate = self.get_parameter('publish_rate').get_parameter_value().double_value
 
-        self.landmarks_xy = self._load_landmarks_0_to_9(map_path)
+        self.boundary_id_order = self.get_parameter('boundary_id_order').get_parameter_value().integer_array_value
+        self.landmarks_xy = self._load_landmarks_by_order(map_path)
         if not self.landmarks_xy:
             self.get_logger().error('랜드마크 0~9를 로드할 수 없습니다. map_path=%s' % map_path)
             raise ValueError('No landmarks 0-9 in map file')
@@ -116,8 +118,8 @@ class LandmarkBoundaryOccupancyGridNode(Node):
         except Exception:
             return None
 
-    def _load_landmarks_0_to_9(self, map_path: str) -> list:
-        """맵 파일에서 id 0~9 랜드마크를 id 순으로 (x, y) 리스트 반환."""
+    def _load_landmarks_by_order(self, map_path: str) -> list:
+        """맵 파일에서 boundary_id_order 순서로 (x, y) 리스트 반환."""
         path = Path(map_path)
         if not path.exists():
             self.get_logger().warn('맵 파일이 없습니다: %s' % map_path)
@@ -130,17 +132,18 @@ class LandmarkBoundaryOccupancyGridNode(Node):
         id_to_xy = {}
         for lm in landmarks:
             lid = lm.get('id')
-            if lid is not None and 0 <= lid <= 9:
+            if lid is not None:
                 pos = lm.get('position', {})
                 x = pos.get('x', 0.0)
                 y = pos.get('y', 0.0)
                 id_to_xy[lid] = (x, y)
 
-        # id 0,1,2,...,7,9,8 순서로 정렬 (8번·9번 순서 교환, 없는 id는 건너뜀)
         result = []
-        for i in [0, 1, 2, 3, 4, 5, 6, 7, 9, 8]:
+        for i in self.boundary_id_order:
             if i in id_to_xy:
                 result.append(id_to_xy[i])
+            else:
+                self.get_logger().warn('boundary_id_order에 지정된 ID %d가 맵에 없습니다' % i)
         return result
 
     def _load_all_landmarks(self, map_path: str) -> list:

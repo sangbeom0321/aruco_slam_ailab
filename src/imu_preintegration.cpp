@@ -25,6 +25,7 @@ public:
     std::unique_ptr<tf2_ros::TransformBroadcaster> tfBroadcaster_;
 
     bool systemInitialized_ = false;
+    std::string runMode_ = "mapping";
 
     // GTSAM noise models
     gtsam::noiseModel::Diagonal::shared_ptr priorPoseNoise_;
@@ -70,6 +71,9 @@ public:
     gtsam::Pose3 baseToImu_;
 
     IMUPreintegration(const rclcpp::NodeOptions& options) : ParamServer("imu_preintegration", options) {
+        declare_parameter("run_mode", "mapping");
+        get_parameter("run_mode", runMode_);
+
         subImu_ = create_subscription<sensor_msgs::msg::Imu>(
             imuTopic, rclcpp::SensorDataQoS(),
             std::bind(&IMUPreintegration::imuHandler, this, std::placeholders::_1));
@@ -241,11 +245,19 @@ public:
                 return;
             }
             
-            // After 1 second, auto-initialize with identity pose
+            // After 1 second stationary period
+            if (runMode_ == "localization") {
+                // Localization: 바이어스 수집 완료, SLAM 초기 위치 추정 대기
+                RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 3000,
+                    "[IMU] Localization mode: bias samples ready (%zu), waiting for SLAM initial pose...",
+                    initGyroSamples_.size());
+                return;
+            }
+            // Mapping: (0,0)에서 즉시 시작
             if (imuQueue_.size() >= 10) {
-                RCLCPP_INFO(get_logger(), "[IMU] Auto-initializing with identity pose (stationary period completed, %zu samples)", 
+                RCLCPP_INFO(get_logger(), "[IMU] Mapping mode: auto-initializing at origin (%zu bias samples)",
                            initGyroSamples_.size());
-                gtsam::Pose3 identityPose = gtsam::Pose3();  // Identity pose at origin
+                gtsam::Pose3 identityPose = gtsam::Pose3();
                 initializeSystem(identityPose);
             } else {
                 if (enableTopicDebugLog) {
@@ -354,17 +366,7 @@ public:
         odom.twist.twist.linear.z = state.velocity().z();
 
         pubImuOdometry_->publish(odom);
-
-        // Broadcast odom → base_link TF
-        geometry_msgs::msg::TransformStamped t;
-        t.header.stamp = stamp;
-        t.header.frame_id = odomFrame;
-        t.child_frame_id = baseLinkFrame;
-        t.transform.translation.x = basePose.translation().x();
-        t.transform.translation.y = basePose.translation().y();
-        t.transform.translation.z = basePose.translation().z();
-        t.transform.rotation = odom.pose.pose.orientation;
-        tfBroadcaster_->sendTransform(t);
+        // TF는 ekf_smoother가 odom → base_footprint로 발행
     }
 
     // Compute initial bias from stationary period samples
@@ -473,6 +475,14 @@ public:
     // 그 시점부터 현재까지 쌓인 IMU 데이터를 "재적분(Re-propagation)" 해야 튐/발산 방지
     void optimizedKeyframeStateCallback(const aruco_sam_ailab::msg::OptimizedKeyframeState::SharedPtr msg) {
         std::lock_guard<std::mutex> lock(mtx_);
+
+        // Localization: 첫 SLAM 보정으로 시스템 초기화
+        if (!systemInitialized_) {
+            gtsam::Pose3 initialPose = poseMsgToGtsam(msg->pose);
+            RCLCPP_INFO(get_logger(), "[IMU] Localization: initializing from SLAM pose (x=%.3f, y=%.3f)",
+                       initialPose.translation().x(), initialPose.translation().y());
+            initializeSystem(initialPose);
+        }
 
         double optTime = stamp2Sec(msg->header.stamp);
 

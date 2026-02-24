@@ -58,8 +58,6 @@ class ParamServer : public rclcpp::Node {
 public:
     // Topics
     std::string imuTopic;
-    std::string wheelOdomTopic;
-    std::string odomTopic;  // /odom for vision-only OdomBetweenFactor
     std::string arucoPosesTopic;
     
     // Frames
@@ -84,15 +82,6 @@ public:
     Eigen::Vector3d extTransBaseDepthCam;
     Eigen::Matrix3d extRotBaseDepthCam;
 
-    // Wheel odometry parameters
-    double wheelOdomTransNoise;
-    double wheelOdomRotNoise;
-    bool useWheelOdom;
-
-    // Odom BetweenFactor (vision-only): /odom topic noise
-    double odomBetweenTransNoise;
-    double odomBetweenRotNoise;
-    
     // IMU usage flag
     bool useImu;
     
@@ -109,6 +98,16 @@ public:
     double isamRelinearizeThreshold;
     int isamRelinearizeSkip;
 
+    // Wheel odometry parameters
+    bool useWheelOdom;
+    std::string wheelOdomTopic;
+    double wheelOdomNoiseX;
+    double wheelOdomNoiseY;
+    double wheelOdomNoiseZ;
+    double wheelOdomNoiseRoll;
+    double wheelOdomNoisePitch;
+    double wheelOdomNoiseYaw;
+
     // Debug: topic receive logging (throttled/first-received)
     bool enableTopicDebugLog;
     
@@ -117,13 +116,9 @@ public:
         
         // Topics
         declare_parameter("imu_topic", "/imu");
-        declare_parameter("wheel_odom_topic", "/wheel_odom");
-        declare_parameter("odom_topic", "/w_odom");
         declare_parameter("aruco_poses_topic", "/aruco_poses");
-        
+
         get_parameter("imu_topic", imuTopic);
-        get_parameter("wheel_odom_topic", wheelOdomTopic);
-        get_parameter("odom_topic", odomTopic);
         get_parameter("aruco_poses_topic", arucoPosesTopic);
         
         // Frames
@@ -185,21 +180,6 @@ public:
         declare_parameter("use_imu", true);
         get_parameter("use_imu", useImu);
         
-        // Wheel odometry parameters
-        declare_parameter("use_wheel_odom", false);
-        declare_parameter("wheel_odom_trans_noise", 0.1);
-        declare_parameter("wheel_odom_rot_noise", 0.1);
-        
-        get_parameter("use_wheel_odom", useWheelOdom);
-        get_parameter("wheel_odom_trans_noise", wheelOdomTransNoise);
-        get_parameter("wheel_odom_rot_noise", wheelOdomRotNoise);
-
-        // Odom BetweenFactor (vision-only)
-        declare_parameter("odom_between_trans_noise", 0.15);
-        declare_parameter("odom_between_rot_noise", 0.15);
-        get_parameter("odom_between_trans_noise", odomBetweenTransNoise);
-        get_parameter("odom_between_rot_noise", odomBetweenRotNoise);
-        
         // ArUco observation parameters
         declare_parameter("aruco_trans_noise", 0.05);
         declare_parameter("aruco_rot_noise", 0.1);
@@ -222,6 +202,25 @@ public:
         
         get_parameter("isam_relinearize_threshold", isamRelinearizeThreshold);
         get_parameter("isam_relinearize_skip", isamRelinearizeSkip);
+
+        // Wheel odometry parameters
+        declare_parameter("use_wheel_odom", true);
+        declare_parameter("wheel_odom_topic", std::string("/w_odom"));
+        declare_parameter("wheel_odom_noise_x", 0.05);
+        declare_parameter("wheel_odom_noise_y", 0.05);
+        declare_parameter("wheel_odom_noise_z", 100.0);
+        declare_parameter("wheel_odom_noise_roll", 100.0);
+        declare_parameter("wheel_odom_noise_pitch", 100.0);
+        declare_parameter("wheel_odom_noise_yaw", 0.02);
+
+        get_parameter("use_wheel_odom", useWheelOdom);
+        get_parameter("wheel_odom_topic", wheelOdomTopic);
+        get_parameter("wheel_odom_noise_x", wheelOdomNoiseX);
+        get_parameter("wheel_odom_noise_y", wheelOdomNoiseY);
+        get_parameter("wheel_odom_noise_z", wheelOdomNoiseZ);
+        get_parameter("wheel_odom_noise_roll", wheelOdomNoiseRoll);
+        get_parameter("wheel_odom_noise_pitch", wheelOdomNoisePitch);
+        get_parameter("wheel_odom_noise_yaw", wheelOdomNoiseYaw);
 
         declare_parameter("enable_topic_debug_log", rclcpp::ParameterValue(false));
         rclcpp::Parameter p;

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Vision-only SLAM: ArUco detector + graph_optimizer (use_imu=False).
+# IMU+Vision SLAM: ArUco detector + graph_optimizer + imu_preintegration + ekf_smoother.
 # ArUco 관측: camera_color_optical_frame 사용.
 
 import yaml
@@ -7,7 +7,8 @@ from os.path import join
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, TimerAction
-from launch.substitutions import LaunchConfiguration
+from launch.conditions import IfCondition
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 
 
@@ -15,15 +16,15 @@ def generate_launch_description():
     pkg_share_aruco = get_package_share_directory('aruco_sam_ailab')
     config_file = join(pkg_share_aruco, 'config', 'slam_params.yaml')
 
-    # slam_params.yaml에서 run_mode, map_path 읽기 (occupancy grid 노드 조건·경로용)
-    run_mode_from_config = 'mapping'
-    map_path_from_config = join(pkg_share_aruco, 'map', 'landmarks_map.json')
+    # slam_params.yaml에서 기본값 읽기 (launch 인자 미지정 시 fallback)
+    run_mode_default = 'mapping'
+    map_path_default = join(pkg_share_aruco, 'map', 'landmarks_map.json')
     try:
         with open(config_file, 'r') as f:
             cfg = yaml.safe_load(f)
         params = cfg.get('/**', {}).get('ros__parameters', {})
-        run_mode_from_config = params.get('run_mode', 'mapping')
-        map_path_from_config = params.get('map_path', map_path_from_config)
+        run_mode_default = params.get('run_mode', 'mapping')
+        map_path_default = params.get('map_path', map_path_default)
     except Exception:
         pass
 
@@ -32,6 +33,18 @@ def generate_launch_description():
         'use_sim_time',
         default_value='false',
         description='Use simulation time'
+    )
+
+    run_mode_arg = DeclareLaunchArgument(
+        'run_mode',
+        default_value=run_mode_default,
+        description='SLAM run mode: "mapping" or "localization"'
+    )
+
+    map_path_arg = DeclareLaunchArgument(
+        'map_path',
+        default_value=map_path_default,
+        description='Landmark map file path for localization mode'
     )
 
     marker_size_arg = DeclareLaunchArgument(
@@ -46,38 +59,19 @@ def generate_launch_description():
         description='Enable topic receive debug logs (aruco) for diagnostics'
     )
 
-    odom_topic_arg = DeclareLaunchArgument(
-        'odom_topic',
-        default_value='/w_odom',
-        description='Wheel odom topic for OdomBetweenFactor (nav_msgs/Odometry, base_link).'
+    imu_topic_arg = DeclareLaunchArgument(
+        'imu_topic',
+        default_value='/camera/imu',
+        description='Raw IMU topic (sim: /camera/imu, real: /camera/camera/imu)'
     )
 
-    # run_mode, map_path: slam_params.yaml에서만 설정 (launch 인자 제거)
     # Launch configurations
     use_sim_time = LaunchConfiguration('use_sim_time')
+    run_mode = LaunchConfiguration('run_mode')
+    map_path = LaunchConfiguration('map_path')
     marker_size = LaunchConfiguration('marker_size')
     enable_topic_debug_log = LaunchConfiguration('enable_topic_debug_log', default='true')
-    odom_topic = LaunchConfiguration('odom_topic', default='/w_odom')
-
-    # Wheel Odometry (joint_states -> wheel_odom)
-    # use_sim_time: Gazebo와 함께 실행 시 true (TF·odom stamp가 /clock 사용)
-    wheel_odom_node = Node(
-        package='aruco_sam_ailab',
-        executable='wheel_odom_node',
-        name='wheel_odom_node',
-        output='screen',
-        parameters=[
-            {'use_sim_time': use_sim_time},
-            {'wheel_radius': 0.165},
-            {'track_width': 0.605},
-            {'base_frame': 'base_footprint'},
-            {'odom_frame': 'odom'},
-            {'publish_tf': True},  # TF odom->base_footprint (graph_optimizer는 publish_tf=false)
-            {'wheel_odom_topic': '/w_odom'},
-            {'sync_with_slam_topic': '/aruco_slam/odom'},
-            {'wheel_odom_correction_topic': '/odometry/wheel_odom_correction'},
-        ],
-    )
+    imu_topic = LaunchConfiguration('imu_topic', default='/camera/imu')
 
     # ArUco detector node for front camera (camera_color_optical_frame)
     # use_depth_correction: Depth로 Z(거리) 보정 → PnP Jitter 감소
@@ -103,29 +97,27 @@ def generate_launch_description():
         parameters=[
             config_file,
             {'use_sim_time': use_sim_time,
-             'enable_topic_debug_log': enable_topic_debug_log,
-             'use_imu': False,
-             'odom_topic': odom_topic},
+             'run_mode': run_mode,
+             'map_path': map_path,
+             'enable_topic_debug_log': enable_topic_debug_log},
         ],
-        remappings=[
-            ('/aruco_poses', '/aruco_poses'),  # Needs MarkerArray from detector
-            ('/odometry/global', '/aruco_slam/odom'), # BUG-C2 Fix: Synchronize with wheel_odom_node
-            ('/path', '/path'),
-        ]
     )
 
-    # Landmark boundary occupancy grid (slam_params.yaml run_mode=="localization"일 때만)
+    # Landmark boundary occupancy grid (run_mode=="localization"일 때만)
     # id 0~9를 직선으로 연결한 벽 테두리 → /map (nav_msgs/OccupancyGrid)
+    is_localization = PythonExpression(["'", run_mode, "' == 'localization'"])
     landmark_boundary_map_node = Node(
         package='aruco_sam_ailab',
         executable='landmark_boundary_occupancy_grid_node.py',
         name='landmark_boundary_occupancy_grid_node',
         output='screen',
-        respawn=True,           # 추가: 죽으면 자동 부활
-        respawn_delay=2.0,      # 추가: 부활 간격 2초
+        condition=IfCondition(is_localization),
+        respawn=True,
+        respawn_delay=2.0,
         parameters=[
+            config_file,
             {'use_sim_time': use_sim_time},
-            {'map_path': map_path_from_config},
+            {'map_path': map_path},
             {'frame_id': 'map'},
             {'resolution': 0.05},
             {'wall_thickness': 1},
@@ -143,7 +135,35 @@ def generate_launch_description():
         arguments=['-d', rviz_config],
     )
 
-    # EgoState publisher: /odom (속도) + TF(map→base_footprint) → /ego_state (50Hz)
+    # IMU Preintegration: raw IMU → dead reckoning odom (~200Hz)
+    # mapping: origin에서 즉시 시작, localization: SLAM 초기 위치 추정 대기
+    imu_preintegration_node = Node(
+        package='aruco_sam_ailab',
+        executable='imu_preintegration',
+        name='imu_preintegration',
+        output='screen',
+        parameters=[
+            config_file,
+            {'use_sim_time': use_sim_time,
+             'run_mode': run_mode,
+             'imu_topic': imu_topic},
+        ],
+    )
+
+    # EKF Smoother: IMU odom + SLAM correction → smoothed odom (map frame, ~200Hz)
+    ekf_smoother_node = Node(
+        package='aruco_sam_ailab',
+        executable='ekf_smoother',
+        name='ekf_smoother',
+        output='screen',
+        parameters=[
+            config_file,
+            {'use_sim_time': use_sim_time,
+             'enable_topic_debug_log': enable_topic_debug_log},
+        ],
+    )
+
+    # EgoState publisher: /ekf/odom (EKF 융합) → /ego_state (~200Hz)
     ego_state_node = Node(
         package='aruco_sam_ailab',
         executable='ego_state_publisher.py',
@@ -154,26 +174,35 @@ def generate_launch_description():
         parameters=[{'use_sim_time': use_sim_time}],
     )
 
+    # map → odom: static identity TF (EKF smoother가 odom → base_footprint 발행)
+    static_tf_map_odom = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='static_tf_map_odom',
+        arguments=['0', '0', '0', '0', '0', '0', 'map', 'odom'],
+    )
+
     # graph_optimizer: 5-second delay for startup race condition mitigation
     graph_optimizer_action = TimerAction(
         period=5.0,
         actions=[graph_optimizer_node]
     )
 
-    ld_actions = [
+    return LaunchDescription([
         use_sim_time_arg,
+        run_mode_arg,
+        map_path_arg,
         marker_size_arg,
         enable_topic_debug_log_arg,
-        odom_topic_arg,
-        wheel_odom_node,
+        imu_topic_arg,
+        static_tf_map_odom,
+        imu_preintegration_node,
         aruco_detector_front,
         graph_optimizer_action,
-    ]
-    if run_mode_from_config == 'localization':
-        ld_actions.append(landmark_boundary_map_node)
-    ld_actions.append(ego_state_node)
-    # RViz는 hunter2_bringup/navigation.launch.py에서 통합 실행
-    # (단독 실행 시 필요하면 아래 주석 해제)
-    # ld_actions.append(rviz_node)
-
-    return LaunchDescription(ld_actions)
+        ekf_smoother_node,
+        landmark_boundary_map_node,
+        ego_state_node,
+        # RViz는 hunter2_bringup/navigation.launch.py에서 통합 실행
+        # (단독 실행 시 필요하면 아래 주석 해제)
+        # rviz_node,
+    ])
