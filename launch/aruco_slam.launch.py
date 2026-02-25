@@ -32,10 +32,12 @@ def launch_setup(context, *args, **kwargs):
     # use_depth_correction: Depth로 Z(거리) 보정 → PnP Jitter 감소
     # 하드웨어(RealSense): /camera/color/*, /camera/depth/image_rect_raw
     # 시뮬레이션(Gazebo):  /camera/rgb/*, /camera/depth/depth/* (노드 기본값)
+    # boundary_id_order에 해당하는 실제 마커 ID만 허용 (거짓 양성 방지)
     aruco_params = {
         'use_sim_time': use_sim_time,
         'depth_max_range': 5.0,
         'depth_sample_radius': 3,
+        'allowed_marker_ids': [11, 12, 13, 14, 15, 16, 17, 18, 19, 20],
     }
     if is_sim:
         aruco_params['use_depth_correction'] = True
@@ -161,7 +163,7 @@ def launch_setup(context, *args, **kwargs):
         ekf_smoother_node,
         landmark_boundary_map_node,
         ego_state_node,
-        # rviz_node,
+        rviz_node,
     ]
 
 

@@ -1,7 +1,8 @@
 /**:
   ros__parameters:
     # Topics
-    aruco_poses_topic:    imu_topic: "/camera/imu"
+    aruco_poses_topic: "/aruco_poses"
+    imu_topic: "/camera/imu"
 
     # Frames
     base_link_frame: "base_footprint"

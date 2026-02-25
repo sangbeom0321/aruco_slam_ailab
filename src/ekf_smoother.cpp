@@ -84,7 +84,7 @@ public:
         get_parameter("ekf_measurement_noise_pos", rPos_);
         get_parameter("ekf_measurement_noise_rot", rRot_);
 
-        declare_parameter("lpf_alpha", 0.05);
+        // lpf_alpha는 ParamServer(utility.hpp)에서 이미 declare됨
         get_parameter("lpf_alpha", lpf_alpha_);
 
         // Initialize covariance matrices
