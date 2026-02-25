@@ -56,6 +56,11 @@ public:
     uint64_t imuCallbackCount_ = 0;
     bool imuFirstReceivedLogged_ = false;
 
+    // IMU Low-Pass Filter state
+    Eigen::Vector3d lpfAcc_ = Eigen::Vector3d::Zero();
+    Eigen::Vector3d lpfGyr_ = Eigen::Vector3d::Zero();
+    bool lpfInitialized_ = false;
+
     // Initial bias estimation (from stationary period)
     double initStartTime_ = -1.0;
     std::vector<Eigen::Vector3d> initGyroSamples_;
@@ -203,6 +208,30 @@ public:
             imu_base.angular_velocity.x = gyr.x();
             imu_base.angular_velocity.y = gyr.y();
             imu_base.angular_velocity.z = gyr.z();
+        }
+
+        // Apply low-pass filter to reduce vibration spikes
+        if (lpfAlpha < 1.0) {
+            Eigen::Vector3d acc(imu_base.linear_acceleration.x,
+                               imu_base.linear_acceleration.y,
+                               imu_base.linear_acceleration.z);
+            Eigen::Vector3d gyr(imu_base.angular_velocity.x,
+                               imu_base.angular_velocity.y,
+                               imu_base.angular_velocity.z);
+            if (!lpfInitialized_) {
+                lpfAcc_ = acc;
+                lpfGyr_ = gyr;
+                lpfInitialized_ = true;
+            } else {
+                lpfAcc_ = lpfAlpha * acc + (1.0 - lpfAlpha) * lpfAcc_;
+                lpfGyr_ = lpfAlpha * gyr + (1.0 - lpfAlpha) * lpfGyr_;
+            }
+            imu_base.linear_acceleration.x = lpfAcc_.x();
+            imu_base.linear_acceleration.y = lpfAcc_.y();
+            imu_base.linear_acceleration.z = lpfAcc_.z();
+            imu_base.angular_velocity.x = lpfGyr_.x();
+            imu_base.angular_velocity.y = lpfGyr_.y();
+            imu_base.angular_velocity.z = lpfGyr_.z();
         }
 
         imuQueue_.push_back(imu_base);

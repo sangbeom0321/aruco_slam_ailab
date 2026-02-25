@@ -108,6 +108,9 @@ public:
     double wheelOdomNoisePitch;
     double wheelOdomNoiseYaw;
 
+    // IMU Low-Pass Filter alpha (0 < alpha <= 1, lower = smoother)
+    double lpfAlpha;
+
     // Debug: topic receive logging (throttled/first-received)
     bool enableTopicDebugLog;
     
@@ -221,6 +224,10 @@ public:
         get_parameter("wheel_odom_noise_roll", wheelOdomNoiseRoll);
         get_parameter("wheel_odom_noise_pitch", wheelOdomNoisePitch);
         get_parameter("wheel_odom_noise_yaw", wheelOdomNoiseYaw);
+
+        // IMU Low-Pass Filter
+        declare_parameter("lpf_alpha", 1.0);  // 1.0 = no filtering (passthrough)
+        get_parameter("lpf_alpha", lpfAlpha);
 
         declare_parameter("enable_topic_debug_log", rclcpp::ParameterValue(false));
         rclcpp::Parameter p;

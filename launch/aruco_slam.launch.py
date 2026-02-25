@@ -30,16 +30,27 @@ def launch_setup(context, *args, **kwargs):
 
     # ArUco detector node for front camera (camera_color_optical_frame)
     # use_depth_correction: Depth로 Z(거리) 보정 → PnP Jitter 감소
+    # 하드웨어(RealSense): /camera/color/*, /camera/depth/image_rect_raw
+    # 시뮬레이션(Gazebo):  /camera/rgb/*, /camera/depth/depth/* (노드 기본값)
+    aruco_params = {
+        'use_sim_time': use_sim_time,
+        'depth_max_range': 5.0,
+        'depth_sample_radius': 3,
+    }
+    if is_sim:
+        aruco_params['use_depth_correction'] = True
+    else:
+        aruco_params['use_depth_correction'] = False
+        aruco_params['camera_topic'] = '/camera/color/image_raw'
+        aruco_params['camera_info_topic'] = '/camera/color/camera_info'
+        aruco_params['depth_topic'] = '/camera/depth/image_rect_raw'
+        aruco_params['depth_camera_info_topic'] = '/camera/depth/camera_info'
+
     aruco_detector_front = Node(
         package='aruco_sam_ailab',
         executable='aruco_detector_node',
         name='aruco_detector_front',
-        parameters=[{
-            'use_sim_time': use_sim_time,
-            'use_depth_correction': True,
-            'depth_max_range': 5.0,
-            'depth_sample_radius': 3,
-        }],
+        parameters=[aruco_params],
         output='screen'
     )
 
@@ -150,8 +161,6 @@ def launch_setup(context, *args, **kwargs):
         ekf_smoother_node,
         landmark_boundary_map_node,
         ego_state_node,
-        # RViz는 hunter2_bringup/navigation.launch.py에서 통합 실행
-        # (단독 실행 시 필요하면 아래 주석 해제)
         # rviz_node,
     ]
 

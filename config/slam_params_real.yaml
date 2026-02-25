@@ -1,8 +1,7 @@
 /**:
   ros__parameters:
     # Topics
-    aruco_poses_topic: "/aruco_poses"
-    imu_topic: "/camera/camera/imu"
+    aruco_poses_topic:    imu_topic: "/camera/imu"
 
     # Frames
     base_link_frame: "base_footprint"
@@ -23,24 +22,27 @@
     # 벽 경계 생성 시 랜드마크 연결 순서 (순서대로 직선 연결, 마지막→첫번째 닫힘)
     boundary_id_order: [11, 12, 13, 14, 15, 16, 17, 18, 20, 19]
 
-    # base_footprint -> camera_color_optical_frame (실측)
-    ext_trans_base_cam: [0.411, 0.049, 0.398]       # TODO: 실제 하드웨어에서 tf2_echo로 확인
+    # base_footprint -> camera_color_optical_frame (실측 TF 기반)
+    # [0,0,0.15] + [0.282,0,0.326] + [0,-0.059,0] = [0.282, -0.059, 0.476]
+    ext_trans_base_cam: [0.282, -0.059, 0.476]
     ext_rot_base_cam: [0.0, 0.0, 1.0, -1.0, 0.0, 0.0, 0.0, -1.0, 0.0]
 
-    # base_footprint -> camera_depth_optical_frame (실측)
-    ext_trans_base_depth_cam: [0.411, 0.048, 0.398]  # TODO: 실제 하드웨어에서 확인
+    # base_footprint -> camera_depth_optical_frame (실측 TF 기반)
+    # depth = camera_link 위치 그대로
+    ext_trans_base_depth_cam: [0.282, 0.0, 0.476]
     ext_rot_base_depth_cam: [0.0, 0.0, 1.0, -1.0, 0.0, 0.0, 0.0, -1.0, 0.0]
 
-    # base_footprint -> camera_imu_optical_frame (실측)
-    ext_trans_base_imu: [0.395, 0.017, 0.405]
+    # base_footprint -> camera_imu_optical_frame (실측 TF 기반)
+    # camera_link + D455 IMU offset [-0.016, -0.030, +0.007]
+    ext_trans_base_imu: [0.266, -0.030, 0.483]
     ext_rot_base_imu: [0.0, 0.0, 1.0, -1.0, 0.0, 0.0, 0.0, -1.0, 0.0]
 
-    # IMU noise parameters (RealSense IMU 기준)
-    # 역할: heading(yaw) 실시간 반응. gyro noise tight → 회전 신뢰 ↑
-    imu_acc_noise: 0.005      # TODO: 실제 IMU Allan Variance 결과로 교체
-    imu_gyr_noise: 0.0005     # TODO: 실제 IMU Allan Variance 결과로 교체
-    imu_acc_bias_n: 0.0013    # TODO: 실제 IMU Allan Variance 결과로 교체
-    imu_gyr_bias_n: 0.00003   # TODO: 실제 IMU Allan Variance 결과로 교체
+    # IMU noise parameters (RealSense D455 BMI055 + 진동 브라켓 보정)
+    # 브라켓 진동이 크므로 ORB-SLAM3 기본값보다 높게 설정
+    imu_acc_noise: 0.15       # acc noise density — 진동 보정 (기본 0.1)
+    imu_gyr_noise: 0.03       # gyr noise density — 진동 보정 (기본 0.01)
+    imu_acc_bias_n: 0.005     # acc bias random walk — 빠른 bias 적응 허용
+    imu_gyr_bias_n: 0.0005    # gyr bias random walk — 빠른 bias 적응 허용
     imu_gravity: 9.81
 
     # IMU flag

@@ -66,6 +66,9 @@ public:
     // ═══ Raw IMU queue (guarded by queueMtx_) ═══
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr subRawImu_;
     std::deque<sensor_msgs::msg::Imu> rawImuQueue_;
+    Eigen::Vector3d lpfAcc_ = Eigen::Vector3d::Zero();
+    Eigen::Vector3d lpfGyr_ = Eigen::Vector3d::Zero();
+    bool lpfInitialized_ = false;
     boost::shared_ptr<gtsam::PreintegrationParams> imuParams_;
     gtsam::PreintegratedImuMeasurements* imuPreintegrator_ = nullptr;  // guarded by slamMtx_
 
@@ -173,6 +176,29 @@ public:
                     imu_base.angular_velocity.x = gyr.x();
                     imu_base.angular_velocity.y = gyr.y();
                     imu_base.angular_velocity.z = gyr.z();
+                }
+                // Apply low-pass filter to reduce vibration spikes
+                if (lpfAlpha < 1.0) {
+                    Eigen::Vector3d a(imu_base.linear_acceleration.x,
+                                      imu_base.linear_acceleration.y,
+                                      imu_base.linear_acceleration.z);
+                    Eigen::Vector3d g(imu_base.angular_velocity.x,
+                                      imu_base.angular_velocity.y,
+                                      imu_base.angular_velocity.z);
+                    if (!lpfInitialized_) {
+                        lpfAcc_ = a;
+                        lpfGyr_ = g;
+                        lpfInitialized_ = true;
+                    } else {
+                        lpfAcc_ = lpfAlpha * a + (1.0 - lpfAlpha) * lpfAcc_;
+                        lpfGyr_ = lpfAlpha * g + (1.0 - lpfAlpha) * lpfGyr_;
+                    }
+                    imu_base.linear_acceleration.x = lpfAcc_.x();
+                    imu_base.linear_acceleration.y = lpfAcc_.y();
+                    imu_base.linear_acceleration.z = lpfAcc_.z();
+                    imu_base.angular_velocity.x = lpfGyr_.x();
+                    imu_base.angular_velocity.y = lpfGyr_.y();
+                    imu_base.angular_velocity.z = lpfGyr_.z();
                 }
                 rawImuQueue_.push_back(imu_base);
                 if (rawImuQueue_.size() > 4000) rawImuQueue_.pop_front();
