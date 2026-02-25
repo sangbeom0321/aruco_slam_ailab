@@ -163,7 +163,7 @@ def launch_setup(context, *args, **kwargs):
         ekf_smoother_node,
         landmark_boundary_map_node,
         ego_state_node,
-        rviz_node,
+        # rviz_node,
     ]
 
 
