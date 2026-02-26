@@ -11,13 +11,15 @@ from rclpy.node import Node
 from rclpy.time import Time
 from nav_msgs.msg import Odometry
 from hunter_msgs2.msg import EgoState
-import tf_transformations
+import math
 
 
 def quaternion_to_yaw(q) -> float:
-    explicit_quat = [q.x, q.y, q.z, q.w]
-    _, _, yaw = tf_transformations.euler_from_quaternion(explicit_quat)
-    return yaw
+    # Direct conversion from quaternion to yaw (z-axis rotation)
+    # yaw = atan2(2.0 * (w*z + x*y), 1.0 - 2.0 * (y*y + z*z))
+    t3 = 2.0 * (q.w * q.z + q.x * q.y)
+    t4 = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+    return math.atan2(t3, t4)
 
 
 class EgoStatePublisher(Node):
