@@ -83,8 +83,5 @@
     ekf_measurement_noise_pos: 0.05    # SLAM position σ (m) — position 보정 빠르게
     ekf_measurement_noise_rot: 0.15    # SLAM rotation σ (rad) — heading 보정은 부드럽게
 
-    # LPF alpha (velocity 및 yaw rate의 Low-Pass Filter 계수)
-    lpf_alpha: 0.05
-
     # Debug
     enable_topic_debug_log: true

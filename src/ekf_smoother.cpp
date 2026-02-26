@@ -53,11 +53,9 @@ public:
     static constexpr int CONVERGENCE_UPDATES = 10;
     int updateCount_ = 0;
 
-    // --- 속도(Twist) 및 Low-Pass Filter 변수 ---
+    // --- 속도(Twist): IMU preintegration에서 직접 수신 ---
     double current_v_ = 0.0;
     double current_yaw_rate_ = 0.0;
-    // 200Hz 미분 노이즈를 부드럽게 잡아주기 위한 필터 계수 (0.01 ~ 0.1 사이 권장)
-    double lpf_alpha_;
 
     // ROS interface
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr subImuOdom_;
@@ -83,9 +81,6 @@ public:
         get_parameter("ekf_process_noise_rot", qRot_);
         get_parameter("ekf_measurement_noise_pos", rPos_);
         get_parameter("ekf_measurement_noise_rot", rRot_);
-
-        // lpf_alpha는 ParamServer(utility.hpp)에서 이미 declare됨
-        get_parameter("lpf_alpha", lpf_alpha_);
 
         // Initialize covariance matrices
         P_ = Eigen::Matrix<double, N, N>::Identity() * 0.01;
@@ -198,20 +193,9 @@ public:
         // Compute relative motion (body-frame, works across any reference frame)
         gtsam::Pose3 delta = lastImuOdomPose_.between(currOdom);
 
-        // --- 속도 계산 및 Low-Pass Filter 적용 ---
-        if (dt > 0.0) {
-            double raw_v = delta.translation().x() / dt;       // 로컬 x축(전진) 속도
-            double raw_yaw_rate = delta.rotation().yaw() / dt; // 로컬 z축 회전 각속도
-
-            if (!initialized_) {
-                current_v_ = raw_v;
-                current_yaw_rate_ = raw_yaw_rate;
-            } else {
-                // 노이즈가 튀지 않도록 이전 속도와 현재 계산된 속도를 부드럽게 융합
-                current_v_ = (1.0 - lpf_alpha_) * current_v_ + lpf_alpha_ * raw_v;
-                current_yaw_rate_ = (1.0 - lpf_alpha_) * current_yaw_rate_ + lpf_alpha_ * raw_yaw_rate;
-            }
-        }
+        // --- 속도: IMU preintegration이 이미 계산한 값을 직접 사용 ---
+        current_v_ = msg->twist.twist.linear.x;
+        current_yaw_rate_ = msg->twist.twist.angular.z;
 
         // Jump detection: if delta implies physically impossible motion, skip it.
         // This happens when imu_preintegration resets its state after receiving
@@ -295,7 +279,7 @@ public:
         odom.child_frame_id = baseLinkFrame;
         odom.pose.pose = gtsamToPoseMsg(statePose_);
 
-        // --- 계산된 속도(Twist) 데이터를 메시지에 채우기 ---
+        // 속도: IMU preintegration에서 수신한 값을 그대로 전달
         odom.twist.twist.linear.x = current_v_;
         odom.twist.twist.linear.y = 0.0;
         odom.twist.twist.linear.z = 0.0;
