@@ -73,14 +73,14 @@ public:
     // LPF state for smooth output (v, yaw_rate)
     double smoothed_v_ = 0.0;
     double smoothed_yaw_rate_ = 0.0;
-    double lpf_alpha_v_ = 0.4;     // 속도는 반응성 중요
+    double lpf_alpha_v_ = 0.1;     // 속도는 반응성 중요
     double lpf_alpha_yaw_ = 0.1;   // 각속도는 부드러움 중요
 
     // Sliding Window for additional smoothing
     std::deque<double> v_window_;
     std::deque<double> yaw_window_;
-    size_t v_window_size_ = 5;      // ~25ms delay at 200Hz
-    size_t yaw_window_size_ = 15;   // ~75ms delay at 200Hz
+    size_t v_window_size_ = 3;      // ~25ms delay at 200Hz
+    size_t yaw_window_size_ = 20;   // ~75ms delay at 200Hz
 
     EkfSmoother(const rclcpp::NodeOptions& options) : ParamServer("ekf_smoother", options) {
         // EKF noise parameters

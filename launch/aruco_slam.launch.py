@@ -100,6 +100,7 @@ def launch_setup(context, *args, **kwargs):
         executable='rviz2',
         name='rviz2',
         arguments=['-d', rviz_config],
+        parameters=[{'use_sim_time': use_sim_time}],
     )
 
     # IMU Preintegration: raw IMU → dead reckoning odom (~200Hz)
@@ -147,6 +148,7 @@ def launch_setup(context, *args, **kwargs):
         executable='static_transform_publisher',
         name='static_tf_map_odom',
         arguments=['0', '0', '0', '0', '0', '0', 'map', 'odom'],
+        parameters=[{'use_sim_time': use_sim_time}],
     )
 
     # graph_optimizer: 5-second delay for startup race condition mitigation
