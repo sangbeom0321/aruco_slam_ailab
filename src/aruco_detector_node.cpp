@@ -246,13 +246,6 @@ private:
                     camera_matrix_, dist_coeffs_,
                     rvecs, tvecs);
 
-                if (ids.empty()) {
-                    // 마커 없음: 빈 MarkerArray 발행 (graph_optimizer가 Dead Reckoning 초기화 가능)
-                    aruco_sam_ailab::msg::MarkerArray empty_array;
-                    empty_array.header.stamp = msg->header.stamp;
-                    empty_array.header.frame_id = camera_frame_;
-                    aruco_poses_pub_->publish(empty_array);
-                } else {
                 // Draw detected markers
                 cv::aruco::drawDetectedMarkers(debug_image, corners, ids);
 
@@ -447,7 +440,6 @@ private:
                 }
 
                 visualization_markers_pub_->publish(vis_marker_array);
-                }
             } else {
                 // 마커 전혀 없음: 빈 MarkerArray 발행 (graph_optimizer Dead Reckoning용)
                 aruco_sam_ailab::msg::MarkerArray empty_array;

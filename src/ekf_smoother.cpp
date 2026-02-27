@@ -70,6 +70,18 @@ public:
     // EKF tuning parameters
     double qPos_, qRot_, rPos_, rRot_;
 
+    // LPF state for smooth output (v, yaw_rate)
+    double smoothed_v_ = 0.0;
+    double smoothed_yaw_rate_ = 0.0;
+    double lpf_alpha_v_ = 0.4;     // 속도는 반응성 중요
+    double lpf_alpha_yaw_ = 0.1;   // 각속도는 부드러움 중요
+
+    // Sliding Window for additional smoothing
+    std::deque<double> v_window_;
+    std::deque<double> yaw_window_;
+    size_t v_window_size_ = 5;      // ~25ms delay at 200Hz
+    size_t yaw_window_size_ = 15;   // ~75ms delay at 200Hz
+
     EkfSmoother(const rclcpp::NodeOptions& options) : ParamServer("ekf_smoother", options) {
         // EKF noise parameters
         declare_parameter("ekf_process_noise_pos", 0.1);
@@ -193,9 +205,25 @@ public:
         // Compute relative motion (body-frame, works across any reference frame)
         gtsam::Pose3 delta = lastImuOdomPose_.between(currOdom);
 
-        // --- 속도: IMU preintegration이 이미 계산한 값을 직접 사용 ---
-        current_v_ = msg->twist.twist.linear.x;
-        current_yaw_rate_ = msg->twist.twist.angular.z;
+        // --- 속도: IMU preintegration이 이미 계산한 값을 직접 사용 + Sliding Window + LPF 적용 ---
+        double raw_v = msg->twist.twist.linear.x;
+        double raw_yaw_rate = msg->twist.twist.angular.z;
+
+        // 1. Sliding Window (Moving Average)
+        v_window_.push_back(raw_v);
+        if (v_window_.size() > v_window_size_) v_window_.pop_front();
+        double ma_v = std::accumulate(v_window_.begin(), v_window_.end(), 0.0) / v_window_.size();
+
+        yaw_window_.push_back(raw_yaw_rate);
+        if (yaw_window_.size() > yaw_window_size_) yaw_window_.pop_front();
+        double ma_yaw = std::accumulate(yaw_window_.begin(), yaw_window_.end(), 0.0) / yaw_window_.size();
+
+        // 2. Low-Pass Filter (MA 결과를 입력으로)
+        smoothed_v_ = lpf_alpha_v_ * ma_v + (1.0 - lpf_alpha_v_) * smoothed_v_;
+        smoothed_yaw_rate_ = lpf_alpha_yaw_ * ma_yaw + (1.0 - lpf_alpha_yaw_) * smoothed_yaw_rate_;
+
+        current_v_ = smoothed_v_;
+        current_yaw_rate_ = smoothed_yaw_rate_;
 
         // Jump detection: if delta implies physically impossible motion, skip it.
         // This happens when imu_preintegration resets its state after receiving

@@ -12,6 +12,7 @@ from rclpy.time import Time
 from nav_msgs.msg import Odometry
 from hunter_msgs2.msg import EgoState
 import math
+from collections import deque
 
 
 def quaternion_to_yaw(q) -> float:
@@ -32,10 +33,16 @@ class EgoStatePublisher(Node):
         self.pub_ego = self.create_publisher(EgoState, '/ego_state', 10)
 
         self._prev_v = 0.0
+        self._prev_a = 0.0
         self._prev_stamp = None
 
+        # Sliding Window for acceleration
+        self._a_window = deque(maxlen=20)  # ~100ms at 200Hz
+
         self.declare_parameter('ego_state_accel_clamp', 3.0)
+        self.declare_parameter('ego_state_accel_alpha', 0.1)  # Smoothness prioritized
         self._accel_clamp = self.get_parameter('ego_state_accel_clamp').value
+        self._accel_alpha = self.get_parameter('ego_state_accel_alpha').value
 
         self.get_logger().info('EgoStatePublisher initialized (v7: EKF only)')
 
@@ -62,14 +69,23 @@ class EgoStatePublisher(Node):
         if self._prev_stamp is not None:
             dt = float((stamp - self._prev_stamp).nanoseconds) * 1e-9
             if dt > 0.005:
+                # 1. Numerical differentiation for acceleration
                 a_raw = float((ego.v - self._prev_v) / dt)
-                ego.a = float(max(float(-self._accel_clamp), min(float(self._accel_clamp), a_raw)))
+                a_clamped = float(max(float(-self._accel_clamp), min(float(self._accel_clamp), a_raw)))
+
+                # 2. Apply LPF
+                a_lpf = self._accel_alpha * a_clamped + (1.0 - self._accel_alpha) * self._prev_a
+
+                # 3. Apply Sliding Window (Moving Average) for final smoothness
+                self._a_window.append(a_lpf)
+                ego.a = sum(self._a_window) / len(self._a_window)
             else:
-                ego.a = 0.0
+                ego.a = self._prev_a
         else:
             ego.a = 0.0
 
         self._prev_v = ego.v
+        self._prev_a = ego.a
         self._prev_stamp = stamp
 
         self.pub_ego.publish(ego)

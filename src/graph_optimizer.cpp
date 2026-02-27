@@ -396,8 +396,8 @@ public:
             markersInBase.markers.push_back(newMarker);
         }
 
-        // 2. Store latest observation for SLAM timer (only when markers detected)
-        if (!markersInBase.markers.empty()) {
+        // 2. Store latest observation for SLAM timer (always update to keep timer alive)
+        {
             std::lock_guard<std::mutex> lock(pendingMtx_);
             pendingMarkers_ = markersInBase;
             pendingStamp_ = msg->header.stamp;

@@ -49,6 +49,7 @@ public:
     std::deque<double> recentAccNorm_;
     static constexpr size_t ACC_WINDOW = 100;            // 0.5s at 200Hz (faster response)
     static constexpr double ACC_STATIONARY_THRESH = 0.15; // m/s² std-dev (lower = more sensitive)
+    static constexpr double GYRO_STATIONARY_THRESH = 0.05; // rad/s (magnitude)
     static constexpr double VELOCITY_MAX = 1.0;           // max reasonable velocity m/s
     static constexpr double VELOCITY_DECAY = 0.995;       // per-step decay: 0.995^200 ≈ 0.37 after 1s
 
@@ -92,7 +93,7 @@ public:
         tfBroadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
 
         // Setup IMU preintegration parameters
-        boost::shared_ptr<gtsam::PreintegrationParams> p = 
+        boost::shared_ptr<gtsam::PreintegrationParams> p =
             gtsam::PreintegrationParams::MakeSharedU(imuGravity);
         p->accelerometerCovariance = gtsam::Matrix33::Identity(3, 3) * pow(imuAccNoise, 2);
         p->gyroscopeCovariance = gtsam::Matrix33::Identity(3, 3) * pow(imuGyrNoise, 2);
@@ -139,7 +140,7 @@ public:
         // Measurements are already in base_link frame, so track state in base_link
         gtsam::Pose3 imuPose = initialPose;
         gtsam::Vector3 initialVel(0, 0, 0);
-        
+
         // Compute initial bias from stationary period data
         gtsam::imuBias::ConstantBias initialBias = computeInitialBias();
 
@@ -189,19 +190,19 @@ public:
 
         // Convert IMU to base_link frame if needed
         sensor_msgs::msg::Imu imu_base = *imuMsg;
-        
+
         // Apply extrinsic rotation if IMU frame is different
         if (imuFrame != baseLinkFrame) {
             Eigen::Vector3d acc(imuMsg->linear_acceleration.x,
-                               imuMsg->linear_acceleration.y,
-                               imuMsg->linear_acceleration.z);
+                                imuMsg->linear_acceleration.y,
+                                imuMsg->linear_acceleration.z);
             Eigen::Vector3d gyr(imuMsg->angular_velocity.x,
-                               imuMsg->angular_velocity.y,
-                               imuMsg->angular_velocity.z);
-            
+                                imuMsg->angular_velocity.y,
+                                imuMsg->angular_velocity.z);
+
             acc = extRotBaseImu * acc;
             gyr = extRotBaseImu * gyr;
-            
+
             imu_base.linear_acceleration.x = acc.x();
             imu_base.linear_acceleration.y = acc.y();
             imu_base.linear_acceleration.z = acc.z();
@@ -213,11 +214,11 @@ public:
         // Apply low-pass filter to reduce vibration spikes
         if (lpfAlpha < 1.0) {
             Eigen::Vector3d acc(imu_base.linear_acceleration.x,
-                               imu_base.linear_acceleration.y,
-                               imu_base.linear_acceleration.z);
+                                imu_base.linear_acceleration.y,
+                                imu_base.linear_acceleration.z);
             Eigen::Vector3d gyr(imu_base.angular_velocity.x,
-                               imu_base.angular_velocity.y,
-                               imu_base.angular_velocity.z);
+                                imu_base.angular_velocity.y,
+                                imu_base.angular_velocity.z);
             if (!lpfInitialized_) {
                 lpfAcc_ = acc;
                 lpfGyr_ = gyr;
@@ -244,7 +245,7 @@ public:
         // Collect IMU data during stationary period for bias estimation
         if (!systemInitialized_) {
             double currentTime = stamp2Sec(imu_base.header.stamp);
-            
+
             // Start collecting samples
             if (initStartTime_ < 0) {
                 initStartTime_ = currentTime;
@@ -252,28 +253,28 @@ public:
                 initAccelSamples_.clear();
                 RCLCPP_INFO(get_logger(), "[IMU] Starting stationary period for bias estimation...");
             }
-            
+
             // Collect samples during stationary period (1 second)
             double elapsed = currentTime - initStartTime_;
             if (elapsed < INIT_STATIONARY_DURATION) {
                 // Collect gyro and accel samples
                 Eigen::Vector3d gyr(imu_base.angular_velocity.x,
-                                   imu_base.angular_velocity.y,
-                                   imu_base.angular_velocity.z);
+                                    imu_base.angular_velocity.y,
+                                    imu_base.angular_velocity.z);
                 Eigen::Vector3d acc(imu_base.linear_acceleration.x,
-                                   imu_base.linear_acceleration.y,
-                                   imu_base.linear_acceleration.z);
+                                    imu_base.linear_acceleration.y,
+                                    imu_base.linear_acceleration.z);
                 initGyroSamples_.push_back(gyr);
                 initAccelSamples_.push_back(acc);
-                
+
                 if (enableTopicDebugLog) {
                     RCLCPP_DEBUG_THROTTLE(get_logger(), *get_clock(), 500,
-                        "[IMU] Collecting bias samples: %.2f/%.2f sec, samples=%zu", 
+                        "[IMU] Collecting bias samples: %.2f/%.2f sec, samples=%zu",
                         elapsed, INIT_STATIONARY_DURATION, initGyroSamples_.size());
                 }
                 return;
             }
-            
+
             // After 1 second stationary period
             if (runMode_ == "localization") {
                 // Localization: 바이어스 수집 완료, SLAM 초기 위치 추정 대기
@@ -285,7 +286,7 @@ public:
             // Mapping: (0,0)에서 즉시 시작
             if (imuQueue_.size() >= 10) {
                 RCLCPP_INFO(get_logger(), "[IMU] Mapping mode: auto-initializing at origin (%zu bias samples)",
-                           initGyroSamples_.size());
+                            initGyroSamples_.size());
                 gtsam::Pose3 identityPose = gtsam::Pose3();
                 initializeSystem(identityPose);
             } else {
@@ -306,19 +307,19 @@ public:
 
         // Track acceleration magnitude for stationary detection
         double accNorm = Eigen::Vector3d(imu_base.linear_acceleration.x,
-                                         imu_base.linear_acceleration.y,
-                                         imu_base.linear_acceleration.z).norm();
+                                            imu_base.linear_acceleration.y,
+                                            imu_base.linear_acceleration.z).norm();
         recentAccNorm_.push_back(accNorm);
         while (recentAccNorm_.size() > ACC_WINDOW) recentAccNorm_.pop_front();
 
         // Integrate IMU measurement
         imuIntegratorImu_->integrateMeasurement(
             gtsam::Vector3(imu_base.linear_acceleration.x,
-                          imu_base.linear_acceleration.y,
-                          imu_base.linear_acceleration.z),
+                            imu_base.linear_acceleration.y,
+                            imu_base.linear_acceleration.z),
             gtsam::Vector3(imu_base.angular_velocity.x,
-                          imu_base.angular_velocity.y,
-                          imu_base.angular_velocity.z),
+                            imu_base.angular_velocity.y,
+                            imu_base.angular_velocity.z),
             dt);
 
         // Predict state
@@ -336,7 +337,7 @@ public:
             prevState_ = gtsam::NavState(prevState_.pose(), vel);
         }
 
-        // Stationary detection: if |acc| magnitude is stable (low std-dev), device is not accelerating
+        // Stationary detection: if |acc| magnitude is stable (low std-dev) AND angular velocity is small
         if (recentAccNorm_.size() >= ACC_WINDOW) {
             double mean = 0.0;
             for (double a : recentAccNorm_) mean += a;
@@ -347,14 +348,18 @@ public:
             var /= recentAccNorm_.size();
             double stddev = std::sqrt(var);
 
+            double gyrNorm = Eigen::Vector3d(imu_base.angular_velocity.x,
+                                            imu_base.angular_velocity.y,
+                                            imu_base.angular_velocity.z).norm();
+
             if (enableTopicDebugLog) {
                 RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000,
-                    "[IMU] acc_stddev=%.4f thresh=%.4f vel=(%.3f,%.3f,%.3f) stationary=%s",
-                    stddev, ACC_STATIONARY_THRESH,
+                    "[IMU] acc_stddev=%.4f gyro_norm=%.4f vel=(%.3f,%.3f,%.3f) stationary=%s",
+                    stddev, gyrNorm,
                     prevState_.velocity().x(), prevState_.velocity().y(), prevState_.velocity().z(),
-                    (stddev < ACC_STATIONARY_THRESH) ? "YES" : "NO");
+                    (stddev < ACC_STATIONARY_THRESH && gyrNorm < GYRO_STATIONARY_THRESH) ? "YES" : "NO");
             }
-            if (stddev < ACC_STATIONARY_THRESH) {
+            if (stddev < ACC_STATIONARY_THRESH && gyrNorm < GYRO_STATIONARY_THRESH) {
                 // Device is stationary: zero out velocity
                 prevState_ = gtsam::NavState(prevState_.pose(), gtsam::Vector3::Zero());
             }
@@ -368,10 +373,13 @@ public:
         }
 
         // Publish incremental odometry (use prevState_ which has corrections applied)
-        publishOdometry(prevState_, imu_base.header.stamp);
+        gtsam::Vector3 currentAngularVel(imu_base.angular_velocity.x,
+                                        imu_base.angular_velocity.y,
+                                        imu_base.angular_velocity.z);
+        publishOdometry(prevState_, imu_base.header.stamp, currentAngularVel);
     }
 
-    void publishOdometry(const gtsam::NavState& state, const rclcpp::Time& stamp) {
+    void publishOdometry(const gtsam::NavState& state, const rclcpp::Time& stamp, const gtsam::Vector3& angular_vel) {
         // State is already tracked in base_link frame (measurements are in base_link)
         gtsam::Pose3 basePose = state.pose();
 
@@ -394,6 +402,10 @@ public:
         odom.twist.twist.linear.y = state.velocity().y();
         odom.twist.twist.linear.z = state.velocity().z();
 
+        odom.twist.twist.angular.x = angular_vel.x();
+        odom.twist.twist.angular.y = angular_vel.y();
+        odom.twist.twist.angular.z = angular_vel.z();
+
         pubImuOdometry_->publish(odom);
         // TF는 ekf_smoother가 odom → base_footprint로 발행
     }
@@ -402,7 +414,7 @@ public:
     gtsam::imuBias::ConstantBias computeInitialBias() {
         gtsam::Vector3 accBias(0, 0, 0);
         gtsam::Vector3 gyrBias(0, 0, 0);
-        
+
         if (!initGyroSamples_.empty() && !initAccelSamples_.empty()) {
             // Compute gyroscope bias (average during stationary period)
             Eigen::Vector3d gyrSum(0, 0, 0);
@@ -410,9 +422,9 @@ public:
                 gyrSum += gyr;
             }
             gyrBias = gtsam::Vector3(gyrSum.x() / initGyroSamples_.size(),
-                                     gyrSum.y() / initGyroSamples_.size(),
-                                     gyrSum.z() / initGyroSamples_.size());
-            
+                                    gyrSum.y() / initGyroSamples_.size(),
+                                    gyrSum.z() / initGyroSamples_.size());
+
             // Compute accelerometer bias
             // During stationary period, measured acc = gravity_in_body + bias
             // Gravity direction is inferred from the mean acceleration vector
@@ -431,19 +443,19 @@ public:
 
             RCLCPP_INFO(get_logger(), "[IMU] Initial bias computed from %zu samples:", initGyroSamples_.size());
             RCLCPP_INFO(get_logger(), "  Gyro bias: [%.6f, %.6f, %.6f] rad/s",
-                       gyrBias.x(), gyrBias.y(), gyrBias.z());
+                        gyrBias.x(), gyrBias.y(), gyrBias.z());
             RCLCPP_INFO(get_logger(), "  Accel mean: [%.3f, %.3f, %.3f] m/s^2 (norm: %.3f, expected: %.3f)",
-                       accMean.x(), accMean.y(), accMean.z(), accMean.norm(), imuGravity);
+                        accMean.x(), accMean.y(), accMean.z(), accMean.norm(), imuGravity);
             RCLCPP_INFO(get_logger(), "  Accel bias: [%.6f, %.6f, %.6f] m/s^2",
-                       accBias.x(), accBias.y(), accBias.z());
+                        accBias.x(), accBias.y(), accBias.z());
         } else {
             RCLCPP_WARN(get_logger(), "[IMU] No samples collected, using zero bias");
         }
-        
+
         // Combine into ConstantBias: [acc_x, acc_y, acc_z, gyr_x, gyr_y, gyr_z]
         return gtsam::imuBias::ConstantBias(
             (gtsam::Vector(6) << accBias.x(), accBias.y(), accBias.z(),
-                                 gyrBias.x(), gyrBias.y(), gyrBias.z()).finished());
+                                gyrBias.x(), gyrBias.y(), gyrBias.z()).finished());
     }
 
     // Called by graph_optimizer to initialize system
@@ -457,14 +469,14 @@ public:
     // Get current IMU preintegration result for keyframe creation
     bool getPreintegratedMeasurement(double time, gtsam::PreintegratedImuMeasurements& preint) {
         std::lock_guard<std::mutex> lock(mtx_);
-        
+
         if (!systemInitialized_ || imuQueue_.empty()) {
             return false;
         }
 
         // Integrate IMU measurements up to the specified time
         gtsam::PreintegratedImuMeasurements tempPreint = *imuIntegratorImu_;
-        
+
         double lastTime = lastImuTime_;
         for (const auto& imu : imuQueue_) {
             double imuTime = stamp2Sec(imu.header.stamp);
@@ -472,16 +484,16 @@ public:
                 double dt = (lastTime < 0) ? (1.0 / 200.0) : (imuTime - lastTime);
                 tempPreint.integrateMeasurement(
                     gtsam::Vector3(imu.linear_acceleration.x,
-                                   imu.linear_acceleration.y,
-                                   imu.linear_acceleration.z),
+                                    imu.linear_acceleration.y,
+                                    imu.linear_acceleration.z),
                     gtsam::Vector3(imu.angular_velocity.x,
-                                   imu.angular_velocity.y,
-                                   imu.angular_velocity.z),
+                                    imu.angular_velocity.y,
+                                    imu.angular_velocity.z),
                     dt);
                 lastTime = imuTime;
             }
         }
-        
+
         preint = tempPreint;
         return true;
     }
@@ -509,7 +521,7 @@ public:
         if (!systemInitialized_) {
             gtsam::Pose3 initialPose = poseMsgToGtsam(msg->pose);
             RCLCPP_INFO(get_logger(), "[IMU] Localization: initializing from SLAM pose (x=%.3f, y=%.3f)",
-                       initialPose.translation().x(), initialPose.translation().y());
+                        initialPose.translation().x(), initialPose.translation().y());
             initializeSystem(initialPose);
         }
 
@@ -523,7 +535,7 @@ public:
         if (msg->bias.size() == 6) {
             prevBias_ = gtsam::imuBias::ConstantBias(
                 (gtsam::Vector(6) << msg->bias[0], msg->bias[1], msg->bias[2],
-                                     msg->bias[3], msg->bias[4], msg->bias[5]).finished());
+                                    msg->bias[3], msg->bias[4], msg->bias[5]).finished());
         }
 
         // 2. 큐 정리: 최적화 시점(optTime)보다 오래된 데이터는 삭제
