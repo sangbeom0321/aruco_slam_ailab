@@ -5,9 +5,13 @@
 ## 목차
 
 1. [ArUco-SAM 개념 및 이론적 배경](#1-aruco-sam-개념-및-이론적-배경)
+   - 1.1 명칭과 의미 / 1.2 LIO-SAM 비교 / 1.3 Factor Graph 수학 / 1.4 ISAM2 vs Batch
 2. [시스템 아키텍처](#2-시스템-아키텍처)
+   - 2.1 데이터 흐름 / 2.2 노드별 상세 / **2.3 이중 추정기: Graph Opt + EKF를 동시에 쓰는 이유** / 2.4 초기화 시퀀스
 3. [시뮬레이션 환경 평가 지표](#3-시뮬레이션-환경-평가-지표)
+   - APE / RPE / Drift Rate / Landmark Accuracy / Ablation Study
 4. [실제 환경 평가 방법론](#4-실제-환경-평가-방법론)
+   - **4.1 바닥 마킹 기반 Ground Truth** / 4.2 내부 일관성 지표 / 4.3 비교 실험 설계
 5. [코드 리뷰 및 개선 제안](#5-코드-리뷰-및-개선-제안)
 
 ---
@@ -332,6 +336,186 @@ $$P_{k|k} = (I - K) P_{k|k-1} (I - K)^T + K R K^T \quad \text{(Joseph form)}$$
 
 설계 의도: 위치는 SLAM 보정을 빠르게 반영(낮은 R_pos)하고, heading은 IMU를 신뢰하여 SLAM 보정을 완만하게 반영(높은 R_rot). 이는 IMU의 자이로스코프가 단기 heading에서 높은 정확도를 보이지만, ArUco PnP의 회전 추정이 상대적으로 부정확하기 때문이다.
 
+### 2.3 이중 추정기 아키텍처: Graph Optimization과 EKF를 동시에 사용하는 이유
+
+본 시스템은 **ISAM2 Factor Graph Optimizer**와 **SE(3) EKF Smoother**라는 두 개의 추정기를 동시에 운용한다. 이는 설계 중복이 아니라, 각각이 해결하는 문제가 근본적으로 다르기 때문이다.
+
+#### 2.3.1 문제 정의: Rate-Accuracy Tradeoff
+
+로봇 제어 시스템은 두 가지 상충하는 요구사항을 동시에 만족해야 한다:
+
+| 요구사항 | 필요 주파수 | 필요 정확도 | 담당 추정기 |
+|---|---|---|---|
+| **경로 추종 제어** | 50~200 Hz | 연속적, 부드러운 포즈 | EKF Smoother |
+| **전역 위치 정확도** | 2~10 Hz | 절대 좌표계 기준 일관성 | Graph Optimizer |
+
+단일 추정기로는 **두 요구사항을 동시에 만족할 수 없다**. 아래에서 각 추정기만 사용할 경우의 문제를 분석한다.
+
+#### 2.3.2 Graph Optimizer만 사용할 경우의 한계
+
+**(a) 이산적 출력 (10 Hz)**
+
+ISAM2 최적화는 키프레임 단위로만 실행된다. 본 시스템에서 키프레임 주기는:
+- 마커 관측 시: 최소 100ms 간격 → 최대 **10 Hz**
+- 마커 미관측 시: 500ms 간격 → **2 Hz**
+
+제어 루프가 50 Hz로 동작한다면, 10 Hz SLAM 출력 사이의 40ms 동안 포즈 정보가 없다. 이 기간 동안 로봇은 "눈을 감고" 주행하는 것과 같다.
+
+**(b) 마커 공백 구간에서 포즈 정지**
+
+마커가 2초간 보이지 않으면, ISAM2는 IMU/wheel odom 데드레코닝 키프레임만 생성한다. 이 키프레임들의 포즈는 누적 drift를 포함하며, 제어기에 직접 전달하면 **불연속적 점프**가 발생한다 (특히 마커 재관측 후 ISAM2가 과거 궤적을 일괄 보정할 때).
+
+**(c) 이상치 내성 부재**
+
+Graph Optimizer의 출력을 직접 사용하면, ISAM2 warmup 기간(초반 5 키프레임)이나 일시적 최적화 실패 시 비정상적 포즈가 그대로 제어기에 전달된다.
+
+#### 2.3.3 EKF만 사용할 경우의 한계
+
+**(a) 누적 Drift**
+
+EKF prediction은 IMU 적분에 의존하며, 프로세스 노이즈 $Q$에 의해 공분산이 선형으로 증가한다:
+
+$$P(t) = P(0) + Q \cdot t$$
+
+본 시스템의 위치 프로세스 노이즈 $q_{\text{pos}} = 0.15$ m/√s에서, SLAM 보정 없이 10초 경과 시:
+$$\sigma_{\text{pos}}(10\text{s}) = \sqrt{0.15^2 \times 10} = 0.47\text{ m} \quad (1\sigma)$$
+
+이는 8m×6m 환경에서 **환경 크기의 6%**에 해당하며, 장기 주행에서는 발산한다.
+
+**(b) 절대 위치 부재**
+
+EKF + IMU + Wheel Odom만으로는 **상대적** 위치 추적만 가능하다. 지도 프레임(map frame)에서의 절대 좌표를 알 수 없으므로:
+- 사전 정의된 목표 지점으로의 자율 주행 불가
+- 다중 세션 간 위치 연속성 불가
+- 맵 기반 경로 계획 불가
+
+**(c) Loop Closure 불가**
+
+동일 지점을 재방문해도 누적 drift를 보정할 메커니즘이 없다. EKF는 **현재 상태만** 유지하므로 과거 궤적을 소급 보정할 수 없다.
+
+#### 2.3.4 이중 추정기의 역할 분담
+
+```
+시간 →  0ms     5ms    10ms   ...  100ms   105ms  ...  200ms
+        │       │       │           │       │           │
+ISAM2   ■━━━━━━━━━━━━━━━━━━━━━━━━━━■━━━━━━━━━━━━━━━━━━━■
+        KF#n                       KF#n+1                KF#n+2
+        │                          │                     │
+        ▼ OptimizedKeyframeState   ▼                     ▼
+        │                          │                     │
+EKF     ■─■─■─■─■─■─■─■─■─■─■─■─■─■─■─■─■─■─■─■─■─■─■─■
+        P  P  P  P  P  P  P  P  P U  P  P  P  P  P  P  U
+                                   ↑                     ↑
+                                   SLAM Update           SLAM Update
+
+■ = EKF prediction (IMU delta), P = predict, U = update (SLAM correction)
+```
+
+| 컴포넌트 | 역할 | 주파수 | 출력 특성 |
+|---|---|---|---|
+| **Graph Optimizer** | 전역 최적화, loop closure, 랜드마크 매핑, 바이어스 추정 | 2~10 Hz | 정확하지만 이산적, 점프 가능 |
+| **IMU Preintegration** | 고주파 데드레코닝, Re-propagation | ~200 Hz | 연속적이지만 drift 있음 |
+| **EKF Smoother** | 두 소스를 Kalman Gain으로 최적 융합, TF 발행 | ~200 Hz | 연속적 + 전역 정확 |
+
+**핵심 통찰:** Graph Optimizer는 **"어디에 있는가"**를 정확히 답하고, EKF는 **"지금 이 순간 어디에 있는가"**를 부드럽게 답한다.
+
+#### 2.3.5 Kalman Gain의 수학적 분석: 센서별 신뢰도
+
+EKF의 Kalman Gain $K$는 프로세스 노이즈 $Q$와 관측 노이즈 $R$의 비율로 결정되며, 이는 **IMU 예측과 SLAM 보정 중 어느 쪽을 더 신뢰할지**를 수학적으로 결정한다.
+
+**본 시스템의 Q, R 행렬** (GTSAM tangent space 순서: `[rot, trans]`):
+
+$$Q = \begin{bmatrix} 0.02^2 \cdot I_3 & 0 \\ 0 & 0.15^2 \cdot I_3 \end{bmatrix} = \begin{bmatrix} 4 \times 10^{-4} \cdot I_3 & 0 \\ 0 & 2.25 \times 10^{-2} \cdot I_3 \end{bmatrix} \text{ (per second)}$$
+
+$$R = \begin{bmatrix} 0.15^2 \cdot I_3 & 0 \\ 0 & 0.05^2 \cdot I_3 \end{bmatrix} = \begin{bmatrix} 2.25 \times 10^{-2} \cdot I_3 & 0 \\ 0 & 2.5 \times 10^{-3} \cdot I_3 \end{bmatrix}$$
+
+**정상 상태 Kalman Gain** (SLAM 보정이 $\Delta t_c = 0.1$초 간격으로 도착할 때):
+
+예측 단계에서 $\Delta t_c$ 동안 축적되는 공분산:
+$$P_{\text{pred}} = P_{\text{post}} + Q \cdot \Delta t_c$$
+
+갱신 단계의 Kalman Gain:
+$$K = P_{\text{pred}} (P_{\text{pred}} + R)^{-1}$$
+
+정상 상태에서 $P_{\text{post}} \approx P_{\text{pred}} - K P_{\text{pred}}$이므로, 이산 대수 Riccati 방정식의 근사해:
+
+$$P_\infty \approx \sqrt{Q \cdot \Delta t_c \cdot R}$$
+
+| 상태 변수 | $Q \cdot \Delta t_c$ | $R$ | $K_\infty$ | 해석 |
+|---|---|---|---|---|
+| **회전** (roll, pitch, yaw) | $4 \times 10^{-5}$ | $2.25 \times 10^{-2}$ | **~0.02** | SLAM 보정을 **2%만** 반영 → **IMU heading을 98% 신뢰** |
+| **병진** (x, y, z) | $2.25 \times 10^{-3}$ | $2.5 \times 10^{-3}$ | **~0.90** | SLAM 위치를 **90%** 반영 → **SLAM 위치를 강하게 신뢰** |
+
+**물리적 의미:**
+
+- **회전 $K \approx 0.02$**: IMU 자이로스코프의 단기 heading 정확도가 높으므로 (`imuGyrNoise = 0.0005`), EKF는 IMU의 heading을 거의 그대로 사용한다. ArUco PnP의 yaw 추정은 상대적으로 노이즈가 크므로 (`arucoRotNoise = 0.5`), SLAM 보정의 yaw 성분은 2%만 반영된다. 이것이 **회전 방향에서 튀지 않는 부드러운 heading**을 만든다.
+
+- **병진 $K \approx 0.90$**: IMU 가속도계만으로는 위치가 빠르게 발산하므로 (`imuAccNoise = 0.005`, 이중 적분 특성상 $t^2$ 발산), SLAM의 위치 보정을 즉시 90% 반영한다. 이것이 **마커 관측 시 위치가 빠르게 수렴**하는 이유이다.
+
+#### 2.3.6 마커 미관측 구간의 동작 분석
+
+마커가 $T$초 동안 보이지 않을 때, EKF는 prediction만 수행하고 update는 없다:
+
+$$P(T) = P(0) + Q \cdot T$$
+
+| 경과 시간 $T$ | $\sigma_{\text{rot}}(T)$ (rad) | $\sigma_{\text{pos}}(T)$ (m) | 상태 |
+|---|---|---|---|
+| 0.1초 | 0.006 | 0.047 | 정상 (마커 재관측 대기) |
+| 1.0초 | 0.020 | 0.150 | 제어 가능 (drift 미미) |
+| 5.0초 | 0.045 | 0.335 | 위치 열화 시작 |
+| 10.0초 | 0.063 | 0.474 | 위치 불확실, heading은 아직 유효 |
+
+**핵심:** 회전 불확실성은 10초 후에도 0.063 rad(3.6°)로 제어 가능 범위이나, 위치는 0.47m까지 열화된다. 이때 마커가 재관측되면:
+1. Graph Optimizer가 ISAM2 최적화 수행 → 절대 위치 보정
+2. `OptimizedKeyframeState` → EKF update 단계 실행
+3. $K_{\text{pos}} \approx 0.90$이므로 위치가 즉시 보정됨
+4. $K_{\text{rot}} \approx 0.02$이므로 heading은 미세 조정만
+
+#### 2.3.7 Re-propagation: ISAM2 보정과 IMU 연속성의 연결
+
+EKF 외에도, `imu_preintegration` 노드가 ISAM2 보정을 수신하면 **Re-propagation**을 수행한다. 이는 이중 추정기 아키텍처의 핵심 메커니즘이다.
+
+```
+ISAM2 보정 시점: t_opt (과거)
+현재 시점:      t_now
+
+IMU 큐: [imu(t_opt), imu(t_opt+5ms), ..., imu(t_now)]
+
+Re-propagation 수순:
+1. prevState_ ← ISAM2가 추정한 (pose, velocity) at t_opt
+2. prevBias_  ← ISAM2가 추정한 bias at t_opt
+3. 적분기 리셋: resetIntegrationAndSetBias(prevBias_)
+4. for each imu in queue[t_opt ... t_now]:
+       integrateMeasurement(acc, gyr, dt)
+5. prevState_ ← predict(prevState_, prevBias_)  // t_now 시점으로 전진
+```
+
+**왜 필요한가:** ISAM2 보정 없이 단순히 `prevState_`만 덮어쓰면, 현재 시점의 IMU 적분 상태와 ISAM2 보정 시점 사이에 시간 간극이 발생한다. Re-propagation은 **과거의 정확한 상태**에서 **현재까지** 새로운 바이어스로 재적분하여, 연속적이면서도 보정된 상태를 생성한다.
+
+#### 2.3.8 요약: 왜 둘 다 필요한가
+
+```
+┌──────────────────────────────────────────────────────────┐
+│                  하나만 쓰면 안 되는 이유                    │
+├────────────────────┬─────────────────────────────────────┤
+│ Graph Optimizer만  │ ✗ 10Hz 이산 출력 → 제어 불가          │
+│                    │ ✗ 마커 없으면 포즈 정지                │
+│                    │ ✗ 출력 점프 → 플래너 불안정             │
+├────────────────────┼─────────────────────────────────────┤
+│ EKF만              │ ✗ 누적 drift 발산                    │
+│                    │ ✗ 절대 위치 없음 → 맵 기반 주행 불가    │
+│                    │ ✗ 과거 보정 불가 (loop closure 없음)   │
+├────────────────────┼─────────────────────────────────────┤
+│ Graph + EKF        │ ✓ 200Hz 연속 출력 (EKF)              │
+│ (본 시스템)         │ ✓ 전역 정확도 (Graph → EKF update)    │
+│                    │ ✓ 마커 공백에도 heading 유지 (IMU)     │
+│                    │ ✓ 마커 재관측 시 즉시 보정 (K≈0.9)     │
+│                    │ ✓ Innovation gating으로 이상치 내성    │
+└────────────────────┴─────────────────────────────────────┘
+```
+
+이 아키텍처는 LIO-SAM이 "IMU preintegration + Factor Graph"로 달성한 것과 동일한 패턴이며, ArUco-SAM은 이에 명시적 EKF 레이어를 추가하여 **센서 퓨전의 투명성과 튜닝 가능성**을 높였다.
+
 #### 2.2.5 ego_state_publisher — 상태 변환
 
 **역할:** `/ekf/odom` (nav_msgs/Odometry)를 `/ego_state` (hunter_msgs2/EgoState)로 변환하여 플래닝 시스템에 제공.
@@ -350,7 +534,7 @@ v(t) → 수치 미분 (dv/dt) → Clamping (±3.0 m/s²) → LPF (α=0.1) → M
 - **Ray-casting 내부 판정**: 폴리곤 내부 = FREE(0), 외부 = UNKNOWN(-1), 벽 = OCCUPIED(100)
 - **로봇 중심 로컬맵**: TF로 로봇 위치를 조회하여 10m × 10m 윈도우 추출
 
-### 2.3 초기화 시퀀스
+### 2.4 초기화 시퀀스
 
 ```
 t=0s   : imu_preintegration 시작 → IMU 바이어스 샘플 수집 (정지 1초)
@@ -469,38 +653,183 @@ IMU, Wheel Odometry, ArUco 관측의 기여도를 정량화하기 위한 ablatio
 
 ## 4. 실제 환경 평가 방법론
 
-실제 환경에서는 Gazebo와 같은 정확한 Ground Truth를 얻기 어렵다. 따라서 여러 방법을 조합하여 신뢰도 있는 평가를 수행한다.
+실제 환경에서는 Gazebo와 같은 연속적 Ground Truth를 얻기 어렵다. 본 장에서는 **바닥 마킹 기반 체크포인트 평가**를 중심으로 실용적이면서도 정량적인 평가 프로토콜을 제시한다.
 
-### 4.1 Ground Truth 확보 방법
+### 4.1 바닥 마킹 기반 Ground Truth 시스템
 
-#### 방법 A: 체크포인트 기반 수동 측정 (권장, 저비용)
+#### 4.1.1 좌표계 설정
 
-1. 환경 내 여러 지점에 체크포인트를 설정하고 줄자/레이저 거리계로 정밀 좌표를 측정
-2. 로봇을 각 체크포인트에 정밀 정렬 후 `/ekf/odom` 포즈를 기록
-3. 측정 좌표 vs 추정 좌표의 오차 계산
+바닥 마킹의 좌표계는 **SLAM의 map frame과 일치**시켜야 한다. Mapping 모드에서 SLAM이 원점(0,0)에서 시작하므로:
 
-**장점:** 특수 장비 불필요, 즉시 수행 가능
-**단점:** 이산적 포인트만 평가, 동적 정확도 미평가
-**정확도:** 줄자 ±5mm, 레이저 거리계 ±2mm
+1. **원점 (0,0)**: 로봇의 SLAM 시작 위치 (Mapping 모드에서의 `base_footprint` 초기 위치)
+2. **X축 양의 방향**: 로봇의 초기 전진 방향
+3. **Y축 양의 방향**: X축에서 반시계 90° (ROS REP-103 규약)
 
-#### 방법 B: 폐루프 일관성 실험 (권장, 자기 평가)
+**원점 마킹 절차:**
+1. 로봇을 시작 위치에 정렬
+2. `base_footprint`의 접지점(바퀴 중심축의 바닥 투영)을 바닥에 표시 → 이것이 원점
+3. 로봇 전진 방향을 줄자로 연장하여 X축 표시
+4. 직각자(L-square)로 Y축 표시
 
-**Start-to-End 오차:**
-1. 시작점에 마커를 배치하고 초기 위치를 기록
-2. 임의 경로로 주행 후 시작점으로 복귀
-3. 최종 위치 추정과 시작점의 오차 측정
+#### 4.1.2 체크포인트 그리드 설계
 
-$$e_{\text{loop}} = \|p_{\text{end}} - p_{\text{start}}\|$$
+환경 크기(약 8m × 6m)를 고려한 체크포인트 배치:
 
-이는 **필요 조건**이다 (오차가 작다고 전체 궤적이 정확한 것은 아니지만, 오차가 크면 확실히 문제가 있다).
+```
+Y(m)
+ 5 ┤  ·  ·  ·  ·  ·  ·  ·  ·  ·    · = 체크포인트 (총 54개)
+ 4 ┤  ·  ·  ·  ·  ·  ·  ·  ·  ·    간격: 1m × 1m
+ 3 ┤  ·  ·  ·  ·  ·  ·  ·  ·  ·    M = ArUco 마커 (벽면)
+ 2 ┤  ·  ·  ·  ·  ·  ·  ·  ·  ·
+ 1 ┤  ·  ·  ·  ·  ·  ·  ·  ·  ·
+ 0 ┤  ◎  ·  ·  ·  ·  ·  ·  ·  ·    ◎ = 원점 (로봇 시작점)
+   └──┬──┬──┬──┬──┬──┬──┬──┬──→ X(m)
+     -2 -1  0  1  2  3  4  5  6
+```
 
-**다중 루프 실험:** 동일 경로를 N회 반복하여 궤적의 재현성(repeatability)을 평가.
+**마킹 방법:**
+- **십자 테이프** (폭 5mm 이하의 컬러 비닐 테이프): 각 체크포인트에 10cm 길이의 십자(+) 마킹
+- **체크포인트 ID**: 각 교차점에 `(x,y)` 좌표를 직접 기입 (예: "P(2,3)")
+- **정밀도 확보**: 1m 간격은 줄자로 측정 (오차 ±3mm), 직각은 3-4-5 삼각형 또는 레이저 직각기로 검증
 
-#### 방법 C: 외부 참조 시스템 (고비용, 고정밀)
+**최소 세트 (빠른 평가용):** 전체 54개 중 핵심 8~12개만 선택
 
-- Motion Capture (OptiTrack/Vicon): mm급 정확도, 고비용
-- Total Station: 실외 cm급 정확도
-- RTK-GPS: 실외 cm급, 실내 불가
+```
+선택 기준:
+- 원점 근처: P(0,0), P(1,0), P(0,1) — 초기 정확도
+- 환경 중앙: P(2,2), P(3,3) — 중거리 정확도
+- 환경 가장자리: P(-2,0), P(6,0), P(0,5) — 최대 거리 정확도
+- 코너: P(-2,5), P(6,5) — 대각 방향 정확도
+- 시작점 재방문: P(0,0) — 폐루프 일관성
+```
+
+#### 4.1.3 실험 프로토콜 (5단계)
+
+**[1단계] 좌표계 수립 및 바닥 마킹 (1회, 환경 설치 시)**
+
+```bash
+준비물: 줄자 (5m+), 직각자 또는 레이저 직각기, 컬러 비닐 테이프, 마커 펜
+소요 시간: 약 30분 (1m 격자 54포인트 기준)
+```
+
+1. 원점 마킹 (로봇 시작점)
+2. X축 방향 줄자 전개 (0m ~ 6m, 1m 간격 마킹)
+3. 각 X축 포인트에서 Y축 방향으로 직각 전개 (0m ~ 5m, 1m 간격 마킹)
+4. 직각 검증: 대각선 길이 확인 (피타고라스 정리, 예: 3m-4m 변의 대각선 = 5m)
+5. 모든 교차점에 십자 테이프 + 좌표 라벨
+
+**[2단계] Mapping 모드 실행 (맵 구축)**
+
+```bash
+# 원점에 로봇 정렬 후 Mapping 시작
+ros2 launch aruco_sam_ailab aruco_slam.launch.py use_sim_time:=false run_mode:=mapping
+
+# 환경 내 모든 마커가 관측되도록 주행
+# 주행 완료 후 맵 저장
+ros2 service call /save_landmarks std_srvs/srv/Trigger "{}"
+```
+
+**[3단계] Localization 모드 실행 및 체크포인트 통과 주행**
+
+```bash
+# 원점에 로봇 정렬 후 Localization 시작 + rosbag 기록
+ros2 launch aruco_sam_ailab aruco_slam.launch.py use_sim_time:=false run_mode:=localization &
+
+# rosbag 기록 시작
+ros2 bag record /ekf/odom /aruco_slam/odom /odometry/imu_incremental \
+    /optimized_keyframe_state /aruco_poses -o checkpoint_run_001
+```
+
+**주행 프로토콜:**
+1. 원점에서 출발 → X축 방향으로 1m 간격 체크포인트 순회
+2. 각 체크포인트에서 **정지** (3초간) → 로봇 `base_footprint` 접지점을 십자 중앙에 정렬
+3. 정지 시점의 타임스탬프를 기록 (스톱워치 또는 `ros2 topic echo /clock`의 시간)
+4. 모든 체크포인트 순회 후 원점으로 복귀
+5. 원점에서 정지 (폐루프 오차 측정)
+
+**[4단계] 데이터 후처리**
+
+rosbag에서 체크포인트 통과 시점의 포즈를 추출하고 Ground Truth와 비교:
+
+```python
+# 후처리 스크립트 개요 (Python + rosbag2_py)
+import numpy as np
+from rosbags.rosbag2 import Reader
+
+# 1. rosbag에서 /ekf/odom 타임시리즈 추출
+# 2. 각 체크포인트 정지 시점(±1초)의 포즈 평균 계산
+# 3. GT 좌표와 비교
+
+checkpoints_gt = {
+    'P(0,0)': (0.0, 0.0),
+    'P(1,0)': (1.0, 0.0),
+    'P(2,0)': (2.0, 0.0),
+    # ...
+}
+
+for cp_id, (gt_x, gt_y) in checkpoints_gt.items():
+    est_x, est_y = extract_pose_at_checkpoint(bag, cp_id, stop_timestamps[cp_id])
+    error = np.sqrt((gt_x - est_x)**2 + (gt_y - est_y)**2)
+    print(f"{cp_id}: GT=({gt_x:.2f},{gt_y:.2f}) Est=({est_x:.2f},{est_y:.2f}) Error={error:.3f}m")
+```
+
+**[5단계] 통계 분석 및 시각화**
+
+$$\text{RMSE}_{\text{checkpoint}} = \sqrt{\frac{1}{N}\sum_{i=1}^{N} \|p_{\text{est},i} - p_{\text{GT},i}\|^2}$$
+
+시각화:
+- **오차 히트맵**: 각 체크포인트에서의 위치 오차를 색상 원으로 바닥 지도 위에 표시
+- **오차 벡터 플롯**: 각 포인트에서 GT→추정 방향의 화살표 → drift 방향 패턴 파악
+- **거리별 오차 분포**: 원점으로부터의 거리 vs 위치 오차 산포도
+
+#### 4.1.4 폐루프 복귀 오차 실험
+
+체크포인트 평가와 **동시에** 수행할 수 있는 가장 간단한 정량 지표:
+
+**프로토콜:**
+1. 원점 P(0,0)에서 출발, 초기 포즈 기록: $p_0 = (x_0, y_0, \theta_0)$
+2. 환경 내 임의 경로 주행 (총 주행 거리 $D$ 기록)
+3. 원점 P(0,0)으로 복귀, 최종 포즈 기록: $p_f = (x_f, y_f, \theta_f)$
+
+**정량 지표:**
+$$e_{\text{trans}} = \sqrt{(x_f - x_0)^2 + (y_f - y_0)^2}$$
+$$e_{\text{rot}} = |\theta_f - \theta_0| \mod 2\pi$$
+$$\text{Drift Rate} = \frac{e_{\text{trans}}}{D} \times 100\%$$
+
+**반복 실험:** 동일 경로를 5회 반복하여 평균 ± 표준편차 보고:
+$$\bar{e}_{\text{trans}} \pm \sigma_e, \quad \text{95\% CI} = \bar{e} \pm 1.96 \cdot \frac{\sigma_e}{\sqrt{N}}$$
+
+#### 4.1.5 주행 시나리오 설계
+
+| 시나리오 | 경로 | 주행거리 | 평가 초점 |
+|---|---|---|---|
+| **A. 직선 왕복** | P(0,0)→P(6,0)→P(0,0) | 12m | 기본 직선 정확도, 복귀 오차 |
+| **B. 사각 루프** | P(0,0)→P(6,0)→P(6,5)→P(0,5)→P(0,0) | 22m | 4방향 drift, 코너링 |
+| **C. 격자 순회** | 모든 체크포인트를 S자로 순회 | ~60m | 전체 환경 커버리지 |
+| **D. 마커 공백 주행** | 마커가 안 보이는 영역을 의도적으로 장기 주행 | 가변 | Dead reckoning 성능 |
+| **E. 반복 주행** | 시나리오 B를 5회 반복 | 110m | 재현성 (repeatability) |
+| **F. 속도 변화** | 동일 경로를 0.3m/s / 1.0m/s / 1.5m/s로 | 가변 | 속도 의존성 |
+
+#### 4.1.6 결과 보고 형식
+
+```
+┌─────────────────────────────────────────────────────┐
+│        ArUco-SAM 실환경 정확도 평가 결과 (예시)       │
+├─────────────────────────────────────────────────────┤
+│ 환경: 실내 8m × 6m, 마커 10개 (ID 11-20)            │
+│ 로봇: Hunter 2.0, RealSense D455                    │
+│ 체크포인트: 12개 (1m 격자에서 선택)                    │
+│ 반복 횟수: 5회                                       │
+├────────────┬────────────────────────────────────────┤
+│ 지표       │ 결과                                    │
+├────────────┼────────────────────────────────────────┤
+│ CP RMSE    │ 0.XX ± 0.XX m (5회 평균)                │
+│ CP Max     │ 0.XX m (at P(x,y))                     │
+│ 폐루프 오차 │ 0.XX ± 0.XX m / 0.X ± 0.X° (5회)       │
+│ Drift Rate │ X.X% (총 주행거리 대비)                  │
+│ Heading 오차│ X.X ± X.X° (체크포인트 정지 시)          │
+└────────────┴────────────────────────────────────────┘
+```
 
 ### 4.2 내부 일관성 지표 (Ground Truth 불필요)
 
