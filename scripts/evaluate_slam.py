@@ -916,7 +916,14 @@ def main():
         sys.exit(1)
 
     # 출력 디렉토리 설정
-    output_dir = args.output_dir or os.path.join(bag_path, "eval_results")
+    # 기본값: aruco_sam_ailab/results/<bag_name>/
+    if args.output_dir:
+        output_dir = args.output_dir
+    else:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        results_base = os.path.join(os.path.dirname(script_dir), "results")
+        bag_name = os.path.basename(os.path.normpath(bag_path))
+        output_dir = os.path.join(results_base, bag_name)
     os.makedirs(output_dir, exist_ok=True)
 
     # ──── 토픽 감지 ────

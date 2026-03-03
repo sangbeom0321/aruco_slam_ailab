@@ -110,6 +110,11 @@ install(PROGRAMS scripts/evaluate_slam.py
     DESTINATION lib/${PROJECT_NAME}
 )
 
+# Install SLAM bag recording script (minimal topics, no images)
+install(PROGRAMS scripts/record_slam_bag.sh
+    DESTINATION lib/${PROJECT_NAME}
+)
+
 # C++ executables
 # Note: Source files will be created in Step 3-4
 # For now, we prepare the structure
