@@ -338,6 +338,50 @@ def print_summary(ape, rpe_list, drift, lm, slam_topic):
     print()
 
 
+def save_metrics_csv(filepath, metrics_full, metrics_loop1, metrics_loop2):
+    """Save all metrics to CSV."""
+    import csv
+    rows = []
+
+    def _add(prefix, m):
+        if m is None:
+            return
+        a = m["ape"]
+        rows.append((f"{prefix}/ape_trans_rmse", f"{a['trans_rmse']:.6f}"))
+        rows.append((f"{prefix}/ape_trans_mean", f"{a['trans_mean']:.6f}"))
+        rows.append((f"{prefix}/ape_trans_median", f"{a['trans_median']:.6f}"))
+        rows.append((f"{prefix}/ape_trans_std", f"{a['trans_std']:.6f}"))
+        rows.append((f"{prefix}/ape_trans_max", f"{a['trans_max']:.6f}"))
+        rows.append((f"{prefix}/ape_rot_rmse", f"{a['rot_rmse']:.6f}"))
+        rows.append((f"{prefix}/ape_rot_mean", f"{a['rot_mean']:.6f}"))
+        rows.append((f"{prefix}/ape_rot_max", f"{a['rot_max']:.6f}"))
+        for rpe in m["rpe"]:
+            d = rpe["delta_m"]
+            rows.append((f"{prefix}/rpe_d{d}_trans_rmse", f"{rpe['trans_rmse']:.6f}"))
+            rows.append((f"{prefix}/rpe_d{d}_rot_rmse", f"{rpe['rot_rmse']:.6f}"))
+        dr = m["drift"]
+        rows.append((f"{prefix}/drift_endpoint_m", f"{dr['endpoint_error_m']:.6f}"))
+        rows.append((f"{prefix}/drift_yaw_deg", f"{dr['endpoint_yaw_error_deg']:.6f}"))
+        rows.append((f"{prefix}/drift_travel_m", f"{dr['total_travel_distance_m']:.6f}"))
+        rows.append((f"{prefix}/drift_rate_pct", f"{dr['drift_rate_pct']:.6f}"))
+        lm = m["lm"]
+        if lm and not math.isnan(lm.get("mean_error", float("nan"))):
+            rows.append((f"{prefix}/landmark_mean_error", f"{lm['mean_error']:.6f}"))
+            rows.append((f"{prefix}/landmark_max_error", f"{lm['max_error']:.6f}"))
+            for mid, err in sorted(lm["per_marker"].items()):
+                rows.append((f"{prefix}/landmark_{mid}_error", f"{err:.6f}"))
+
+    _add("full", metrics_full)
+    _add("loop1", metrics_loop1)
+    _add("loop2", metrics_loop2)
+
+    with open(filepath, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["metric", "value"])
+        w.writerows(rows)
+    print(f"  CSV saved: {filepath}")
+
+
 # ═══════════════════════════════════════
 # Plot helpers
 # ═══════════════════════════════════════
@@ -429,6 +473,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--bag", type=str, default=None)
     parser.add_argument("--slam-topic", type=str, default="/aruco_slam/odom")
+    parser.add_argument("--output-dir", type=str, default=None,
+                        help="Directory to save results (plot + CSV)")
     args = parser.parse_args()
 
     # ── Extract ──
@@ -593,10 +639,22 @@ def main():
                ncol=5, fontsize=9, framealpha=0.9)
 
     plt.tight_layout(rect=[0, 0.06, 1, 1])
-    out_dir = os.path.dirname(os.path.abspath(__file__))
-    out_path = os.path.join(out_dir, "gt_box_marker_layout.png")
+
+    # Determine output directory
+    if args.output_dir:
+        out_dir = args.output_dir
+        os.makedirs(out_dir, exist_ok=True)
+    else:
+        out_dir = os.path.dirname(os.path.abspath(__file__))
+
+    out_path = os.path.join(out_dir, "trajectory_plot.png")
     fig.savefig(out_path, dpi=150)
-    print(f"Saved: {out_path}")
+    print(f"  Plot saved: {out_path}")
+
+    # Save CSV
+    if metrics_full and args.output_dir:
+        csv_path = os.path.join(out_dir, "metrics.csv")
+        save_metrics_csv(csv_path, metrics_full, metrics_loop1, metrics_loop2)
 
 
 if __name__ == "__main__":
