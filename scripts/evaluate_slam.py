@@ -617,7 +617,8 @@ def compute_landmark_accuracy(landmarks_map_path: str,
         "mean_error": float(np.mean(errors)),
         "max_error": float(np.max(errors)),
         "max_error_id": max_id,
-        "est_landmarks": est_landmarks,
+        "est_landmarks": est_landmarks,          # T_lm 적용된 (Gazebo 프레임)
+        "est_landmarks_raw": est_landmarks_raw,  # 원본 SLAM 프레임
         "gt_landmarks": gt_landmarks,
         "T_landmark_align": T_lm,
     }
@@ -641,12 +642,45 @@ def extract_yaws(traj: PoseTrajectory3D) -> np.ndarray:
     return yaws
 
 
+def _transform_trajectory(traj: PoseTrajectory3D,
+                           T: np.ndarray) -> PoseTrajectory3D:
+    """SE(3) 변환 T를 궤적 전체 포즈에 적용하여 새 궤적 반환."""
+    new_poses = reorthogonalize_poses(
+        np.array([T @ p for p in traj.poses_se3]))
+    return PoseTrajectory3D(
+        poses_se3=new_poses, timestamps=traj.timestamps.copy())
+
+
+def _transform_point_2d(T: np.ndarray, x: float, y: float):
+    """SE(3) 변환 T를 2D 좌표에 적용 (z=0 가정)."""
+    p = T @ np.array([x, y, 0.0, 1.0])
+    return float(p[0]), float(p[1])
+
+
+def _compute_marker_info_in_frame(T: np.ndarray) -> dict:
+    """GT 마커 박스/면/법선 정보를 변환 T가 적용된 프레임으로 계산.
+
+    Gazebo 프레임의 compute_marker_gt_positions() 결과에 T를 적용합니다.
+    """
+    marker_info = compute_marker_gt_positions()
+    theta = math.atan2(T[1, 0], T[0, 0])
+    result = {}
+    for mid, info in marker_info.items():
+        bx, by = _transform_point_2d(T, *info["box"])
+        fx, fy = _transform_point_2d(T, *info["face"])
+        result[mid] = {
+            "face": (fx, fy), "box": (bx, by),
+            "yaw": info["yaw"] + theta,
+            "normal_yaw": info["normal_yaw"] + theta,
+        }
+    return result
+
+
 def plot_trajectories_2d(traj_gt, traj_est_dict, output_dir, landmarks=None,
                          aruco_visibility=None):
-    """2D XY 궤적 비교 그래프 (Gazebo 프레임). aruco_visibility가 있으면 미감지 구간 표시."""
+    """2D XY 궤적 비교 그래프 (SLAM 프레임). aruco_visibility가 있으면 미감지 구간 표시."""
     fig, ax = plt.subplots(figsize=(10, 8))
 
-    # 모든 데이터가 Gazebo 프레임으로 통일되어 있으므로 직접 사용
     gt_xy = traj_gt.positions_xyz[:, :2]
     ax.plot(gt_xy[:, 0], gt_xy[:, 1], "k-", linewidth=2.0, label="GT", zorder=3)
     ax.plot(gt_xy[0, 0], gt_xy[0, 1], "go", markersize=10, label="Start", zorder=5)
@@ -693,35 +727,34 @@ def plot_trajectories_2d(traj_gt, traj_est_dict, output_dir, landmarks=None,
         ax.plot(xy[:, 0], xy[:, 1], "-", color=color, linewidth=1.5,
                 label=name, alpha=0.8, zorder=2)
 
-    # 랜드마크 (사각형 + 헤딩 화살표) — 모두 Gazebo 프레임
+    # 랜드마크 — SLAM 프레임 기준
     if landmarks:
-        gt_lm = landmarks.get("gt_landmarks", {})
-        est_lm = landmarks.get("est_landmarks", {})
-        marker_info = compute_marker_gt_positions()
+        marker_info = landmarks.get("marker_info", {})  # SLAM 프레임의 마커 박스 정보
+        est_lm = landmarks.get("est_landmarks", {})     # raw SLAM 랜드마크
 
-        for mid, pos in gt_lm.items():
-            if mid in marker_info:
-                info = marker_info[mid]
-                box_x, box_y = info["box"]
-                yaw = info["yaw"]
-                normal_yaw = info["normal_yaw"]
-                half = BOX_SIZE / 2.0
-                corners_local = np.array([
-                    [-half, -half], [half, -half],
-                    [half, half], [-half, half], [-half, -half]])
-                cos_y, sin_y = np.cos(yaw), np.sin(yaw)
-                corners_world = np.column_stack([
-                    box_x + corners_local[:, 0]*cos_y - corners_local[:, 1]*sin_y,
-                    box_y + corners_local[:, 0]*sin_y + corners_local[:, 1]*cos_y])
-                ax.plot(corners_world[:, 0], corners_world[:, 1],
-                        "k-", linewidth=1.0, zorder=4)
-                arrow_len = 0.3
-                ax.annotate("", xy=(pos[0] + arrow_len*np.cos(normal_yaw),
-                                    pos[1] + arrow_len*np.sin(normal_yaw)),
-                            xytext=(pos[0], pos[1]),
-                            arrowprops=dict(arrowstyle="->", color="black",
-                                            lw=1.5), zorder=5)
-            ax.annotate(f"M{mid}", (pos[0], pos[1]), fontsize=7,
+        for mid in sorted(marker_info.keys()):
+            info = marker_info[mid]
+            box_x, box_y = info["box"]
+            face_x, face_y = info["face"]
+            yaw = info["yaw"]
+            normal_yaw = info["normal_yaw"]
+            half = BOX_SIZE / 2.0
+            corners_local = np.array([
+                [-half, -half], [half, -half],
+                [half, half], [-half, half], [-half, -half]])
+            cos_y, sin_y = np.cos(yaw), np.sin(yaw)
+            corners_world = np.column_stack([
+                box_x + corners_local[:, 0]*cos_y - corners_local[:, 1]*sin_y,
+                box_y + corners_local[:, 0]*sin_y + corners_local[:, 1]*cos_y])
+            ax.plot(corners_world[:, 0], corners_world[:, 1],
+                    "k-", linewidth=1.0, zorder=4)
+            arrow_len = 0.3
+            ax.annotate("", xy=(face_x + arrow_len*np.cos(normal_yaw),
+                                face_y + arrow_len*np.sin(normal_yaw)),
+                        xytext=(face_x, face_y),
+                        arrowprops=dict(arrowstyle="->", color="black",
+                                        lw=1.5), zorder=5)
+            ax.annotate(f"M{mid}", (face_x, face_y), fontsize=7,
                         xytext=(3, 3), textcoords="offset points", zorder=6)
 
         for mid, pos in est_lm.items():
@@ -729,7 +762,7 @@ def plot_trajectories_2d(traj_gt, traj_est_dict, output_dir, landmarks=None,
 
     ax.set_xlabel("X (m)")
     ax.set_ylabel("Y (m)")
-    ax.set_title("2D Trajectory Comparison (Gazebo Frame)")
+    ax.set_title("2D Trajectory Comparison (SLAM Frame)")
     ax.legend(loc="best")
     ax.set_aspect("equal")
     ax.grid(True, alpha=0.3)
@@ -846,47 +879,45 @@ def plot_rpe_by_delta(rpe_results, output_dir):
 
 
 def plot_landmark_comparison(lm_result, output_dir):
-    """GT vs 추정 랜드마크 위치 비교 (Gazebo 프레임)."""
-    gt_lm = lm_result["gt_landmarks"]
-    est_lm = lm_result["est_landmarks"]
+    """GT vs 추정 랜드마크 위치 비교 (SLAM 프레임)."""
+    marker_info = lm_result["marker_info"]  # SLAM 프레임의 GT 마커 박스 정보
+    est_lm = lm_result["est_landmarks"]     # raw SLAM 랜드마크
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
 
-    # 2D 위치 비교 (사각형 + 헤딩) — Gazebo 프레임 직접 사용
-    marker_info = compute_marker_gt_positions()
-    for mid in sorted(gt_lm.keys()):
-        gt_pos = gt_lm[mid]
-        if mid in marker_info:
-            info = marker_info[mid]
-            box_x, box_y = info["box"]
-            yaw = info["yaw"]
-            normal_yaw = info["normal_yaw"]
-            half = BOX_SIZE / 2.0
-            corners_local = np.array([
-                [-half, -half], [half, -half],
-                [half, half], [-half, half], [-half, -half]])
-            cos_y, sin_y = np.cos(yaw), np.sin(yaw)
-            corners_world = np.column_stack([
-                box_x + corners_local[:, 0]*cos_y - corners_local[:, 1]*sin_y,
-                box_y + corners_local[:, 0]*sin_y + corners_local[:, 1]*cos_y])
-            ax1.plot(corners_world[:, 0], corners_world[:, 1],
-                     "k-", linewidth=1.0, zorder=3)
-            ax1.annotate("", xy=(gt_pos[0] + 0.3*np.cos(normal_yaw),
-                                 gt_pos[1] + 0.3*np.sin(normal_yaw)),
-                         xytext=(gt_pos[0], gt_pos[1]),
-                         arrowprops=dict(arrowstyle="->", color="black", lw=1.5),
-                         zorder=4)
-        ax1.annotate(f"GT {mid}", (gt_pos[0], gt_pos[1]),
+    # 2D 위치 비교 (사각형 + 헤딩) — SLAM 프레임
+    for mid in sorted(marker_info.keys()):
+        info = marker_info[mid]
+        face_x, face_y = info["face"]
+        box_x, box_y = info["box"]
+        yaw = info["yaw"]
+        normal_yaw = info["normal_yaw"]
+        half = BOX_SIZE / 2.0
+        corners_local = np.array([
+            [-half, -half], [half, -half],
+            [half, half], [-half, half], [-half, -half]])
+        cos_y, sin_y = np.cos(yaw), np.sin(yaw)
+        corners_world = np.column_stack([
+            box_x + corners_local[:, 0]*cos_y - corners_local[:, 1]*sin_y,
+            box_y + corners_local[:, 0]*sin_y + corners_local[:, 1]*cos_y])
+        ax1.plot(corners_world[:, 0], corners_world[:, 1],
+                 "k-", linewidth=1.0, zorder=3)
+        ax1.annotate("", xy=(face_x + 0.3*np.cos(normal_yaw),
+                             face_y + 0.3*np.sin(normal_yaw)),
+                     xytext=(face_x, face_y),
+                     arrowprops=dict(arrowstyle="->", color="black", lw=1.5),
+                     zorder=4)
+        ax1.annotate(f"GT {mid}", (face_x, face_y),
                      fontsize=7, xytext=(-10, 8), textcoords="offset points")
         if mid in est_lm:
             est_pos = est_lm[mid][:2]
             ax1.plot(est_pos[0], est_pos[1], "r^", markersize=8, alpha=0.7)
-            ax1.plot([gt_pos[0], est_pos[0]], [gt_pos[1], est_pos[1]],
+            ax1.plot([face_x, est_pos[0]], [face_y, est_pos[1]],
                      "r--", alpha=0.4, linewidth=0.8)
 
     ax1.set_xlabel("X (m)")
     ax1.set_ylabel("Y (m)")
-    ax1.set_title("Landmark Positions: GT vs SLAM (Gazebo Frame)")
+    ax1.set_title("Landmark Positions: GT vs SLAM (SLAM Frame)")
     ax1.set_aspect("equal")
     ax1.grid(True, alpha=0.3)
 
@@ -1217,22 +1248,55 @@ def main():
         os.makedirs(est_output_dir, exist_ok=True)
         save_metrics_csv(ape, rpe_list, drift, lm_result, est_output_dir)
 
-        # ──── 시각화 ────
+        # ──── 시각화 (SLAM 프레임) ────
         if not args.no_plot and HAS_MATPLOTLIB:
             print("[6/6] 그래프 생성 중...")
-            traj_est_dict = {est_topic: traj_est_aligned}
-            lm_for_plot = lm_result if lm_result else None
 
-            plot_trajectories_2d(traj_gt_sync, traj_est_dict, est_output_dir,
+            # 궤적을 SLAM 프레임으로 변환: T_align^{-1} 적용
+            T_align = align_info.get("T_align")
+            if T_align is not None:
+                T_traj_inv = np.linalg.inv(T_align)
+                traj_gt_plot = _transform_trajectory(traj_gt_sync, T_traj_inv)
+                traj_est_plot = _transform_trajectory(traj_est_aligned, T_traj_inv)
+            else:
+                T_traj_inv = np.eye(4)
+                traj_gt_plot = traj_gt_sync
+                traj_est_plot = traj_est_aligned
+
+            # 랜드마크 SLAM 프레임 데이터 준비
+            lm_for_plot = None
+            if lm_result and not math.isnan(lm_result.get("mean_error", float("nan"))):
+                T_lm = lm_result.get("T_landmark_align")
+                if T_lm is not None:
+                    T_lm_inv = np.linalg.inv(T_lm)
+                else:
+                    T_lm_inv = np.eye(4)
+                # GT 마커 박스 정보를 SLAM 랜드마크 프레임으로 변환
+                marker_info_slam = _compute_marker_info_in_frame(T_lm_inv)
+                lm_for_plot = {
+                    "marker_info": marker_info_slam,
+                    "est_landmarks": lm_result["est_landmarks_raw"],
+                    "per_marker": lm_result["per_marker"],
+                    "mean_error": lm_result["mean_error"],
+                    "max_error": lm_result["max_error"],
+                    "max_error_id": lm_result["max_error_id"],
+                }
+                if "per_marker_yaw" in lm_result:
+                    lm_for_plot["per_marker_yaw"] = lm_result["per_marker_yaw"]
+                    lm_for_plot["mean_yaw_error"] = lm_result["mean_yaw_error"]
+                    lm_for_plot["max_yaw_error"] = lm_result["max_yaw_error"]
+
+            traj_est_dict = {est_topic: traj_est_plot}
+            plot_trajectories_2d(traj_gt_plot, traj_est_dict, est_output_dir,
                                 landmarks=lm_for_plot,
                                 aruco_visibility=aruco_vis)
             plot_ape_over_time(ape, est_output_dir)
             plot_ape_distribution(ape, est_output_dir)
             plot_rpe_by_delta(rpe_list, est_output_dir)
-            plot_yaw_comparison(traj_gt_sync, traj_est_aligned, est_output_dir)
+            plot_yaw_comparison(traj_gt_plot, traj_est_plot, est_output_dir)
 
-            if lm_result and not math.isnan(lm_result.get("mean_error", float("nan"))):
-                plot_landmark_comparison(lm_result, est_output_dir)
+            if lm_for_plot:
+                plot_landmark_comparison(lm_for_plot, est_output_dir)
 
             print(f"  그래프 저장: {est_output_dir}/")
         elif not HAS_MATPLOTLIB:
