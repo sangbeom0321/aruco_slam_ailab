@@ -936,6 +936,16 @@ public:
                     frameIdx_, corrTrans, corrYaw * 180.0 / M_PI, markers.markers.size(), gapFrames);
             }
 
+            // 50프레임마다 요약 로그 (키프레임 진행 상태 모니터링)
+            if (frameIdx_ % 50 == 0) {
+                RCLCPP_INFO(get_logger(),
+                    "[ISAM2] frame=%d pos=(%.3f,%.3f) yaw=%.2f markers=%zu corr=%.3fm landmarks=%zu",
+                    frameIdx_,
+                    currentEstimate_.translation().x(), currentEstimate_.translation().y(),
+                    currentEstimate_.rotation().yaw(), markers.markers.size(), corrTrans,
+                    landmarkIdToKey_.size());
+            }
+
             RCLCPP_DEBUG(get_logger(),
                 "[ISAM2] frame=%d pos=(%.3f,%.3f) yaw=%.2f markers=%zu corr=%.3fm",
                 frameIdx_,
