@@ -322,7 +322,7 @@ def compute_drift_rate(gt_x, gt_y, gt_yaw, est_x, est_y, est_yaw):
 def compute_landmark_accuracy(slam_lm_aligned):
     """Per-marker error vs GT marker face position."""
     per_marker = {}
-    for mid, (sx, sy) in slam_lm_aligned.items():
+    for mid, (sx, sy, *_) in slam_lm_aligned.items():
         if mid in GAZEBO_BOX_CENTERS:
             bx, by = GAZEBO_BOX_CENTERS[mid]
             gt_mx, gt_my = compute_gt_marker_face(bx, by)
