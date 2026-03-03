@@ -124,6 +124,59 @@ def extract_odometry(bag_path: str, topic: str) -> list:
     return poses
 
 
+def extract_aruco_visibility(bag_path: str, aruco_topic: str = "/aruco_poses") -> dict:
+    """
+    rosbag에서 ArUco 감지 여부를 타임스탬프별로 추출합니다.
+
+    Returns:
+        dict with keys:
+            "timestamps": np.ndarray of all message timestamps
+            "marker_counts": np.ndarray of detected marker count per frame
+            "no_detection_timestamps": np.ndarray of timestamps where 0 markers detected
+    """
+    typestore = get_typestore(Stores.ROS2_HUMBLE)
+
+    # Register custom ArUco message types
+    try:
+        from rosbags.typesys.msg import get_types_from_msg
+        add_types = {}
+        add_types.update(get_types_from_msg(
+            "int32 id\ngeometry_msgs/Pose pose",
+            "aruco_sam_ailab/msg/MarkerObservation"))
+        add_types.update(get_types_from_msg(
+            "std_msgs/Header header\naruco_sam_ailab/msg/MarkerObservation[] markers",
+            "aruco_sam_ailab/msg/MarkerArray"))
+        typestore.register(add_types)
+    except Exception:
+        pass  # already registered
+
+    timestamps = []
+    marker_counts = []
+
+    with Reader(bag_path) as reader:
+        connections = [c for c in reader.connections if c.topic == aruco_topic]
+        if not connections:
+            print(f"  [ArUco] Topic '{aruco_topic}' not found, skipping visibility analysis")
+            return None
+
+        for conn, ts, rawdata in reader.messages(connections=connections):
+            msg = typestore.deserialize_cdr(rawdata, conn.msgtype)
+            t_sec = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+            timestamps.append(t_sec)
+            marker_counts.append(len(msg.markers))
+
+    timestamps = np.array(timestamps)
+    marker_counts = np.array(marker_counts)
+    no_det = timestamps[marker_counts == 0]
+
+    print(f"  [ArUco] {len(timestamps)} frames, {len(no_det)} with no detection")
+    return {
+        "timestamps": timestamps,
+        "marker_counts": marker_counts,
+        "no_detection_timestamps": no_det,
+    }
+
+
 def auto_select_topics(available: dict) -> tuple:
     """사용 가능한 토픽에서 GT/추정 토픽을 자동 선택합니다."""
     gt_topic = None
@@ -464,8 +517,9 @@ def extract_yaws(traj: PoseTrajectory3D) -> np.ndarray:
     return yaws
 
 
-def plot_trajectories_2d(traj_gt, traj_est_dict, output_dir, landmarks=None):
-    """2D XY 궤적 비교 그래프."""
+def plot_trajectories_2d(traj_gt, traj_est_dict, output_dir, landmarks=None,
+                         aruco_visibility=None):
+    """2D XY 궤적 비교 그래프. aruco_visibility가 있으면 미감지 구간 표시."""
     fig, ax = plt.subplots(figsize=(10, 8))
 
     # GT 궤적
@@ -473,6 +527,42 @@ def plot_trajectories_2d(traj_gt, traj_est_dict, output_dir, landmarks=None):
     ax.plot(gt_xy[:, 0], gt_xy[:, 1], "k-", linewidth=2.0, label="GT", zorder=3)
     ax.plot(gt_xy[0, 0], gt_xy[0, 1], "go", markersize=10, label="Start", zorder=5)
     ax.plot(gt_xy[-1, 0], gt_xy[-1, 1], "rx", markersize=10, mew=2, label="End", zorder=5)
+
+    # ArUco 미감지 구간 표시 (GT 궤적 위)
+    if aruco_visibility is not None:
+        no_det_ts = aruco_visibility["no_detection_timestamps"]
+        all_ts = aruco_visibility["timestamps"]
+        gt_ts = traj_gt.timestamps
+
+        if len(no_det_ts) > 0:
+            # GT 궤적에서 미감지 시점에 가장 가까운 포즈 찾기
+            no_det_indices = []
+            for t in no_det_ts:
+                idx = np.argmin(np.abs(gt_ts - t))
+                if np.abs(gt_ts[idx] - t) < 0.1:  # 100ms tolerance
+                    no_det_indices.append(idx)
+
+            if no_det_indices:
+                no_det_xy = gt_xy[no_det_indices]
+                ax.scatter(no_det_xy[:, 0], no_det_xy[:, 1], c="red", s=40,
+                           marker="o", edgecolors="darkred", linewidths=0.8,
+                           label=f"No ArUco ({len(no_det_indices)})", zorder=6,
+                           alpha=0.8)
+
+        # ArUco 감지 밀도가 낮은 구간도 표시 (선택: 1초 이상 간격)
+        detection_ts = all_ts[aruco_visibility["marker_counts"] > 0]
+        if len(detection_ts) > 1:
+            gaps = np.diff(detection_ts)
+            long_gaps = np.where(gaps > 1.0)[0]  # 1초 이상 간격
+            for gi in long_gaps:
+                gap_start_t = detection_ts[gi]
+                gap_end_t = detection_ts[gi + 1]
+                # 이 구간의 GT 포즈 인덱스
+                gap_mask = (gt_ts >= gap_start_t) & (gt_ts <= gap_end_t)
+                if np.any(gap_mask):
+                    gap_xy = gt_xy[gap_mask]
+                    ax.plot(gap_xy[:, 0], gap_xy[:, 1], "-", color="red",
+                            linewidth=3.0, alpha=0.4, zorder=2.5)
 
     # 추정 궤적
     colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728"]
@@ -876,6 +966,9 @@ def main():
         else:
             print(f"  [경고] {topic}: 데이터 부족 ({len(data)}개), 건너뜀")
 
+    # ArUco visibility 추출 (미감지 구간 시각화용)
+    aruco_vis = extract_aruco_visibility(bag_path)
+
     if not est_data_dict:
         print("[오류] 유효한 추정 데이터가 없습니다.")
         sys.exit(1)
@@ -944,7 +1037,8 @@ def main():
             lm_for_plot = lm_result if lm_result else None
 
             plot_trajectories_2d(traj_gt_sync, traj_est_dict, est_output_dir,
-                                landmarks=lm_for_plot)
+                                landmarks=lm_for_plot,
+                                aruco_visibility=aruco_vis)
             plot_ape_over_time(ape, est_output_dir)
             plot_ape_distribution(ape, est_output_dir)
             plot_rpe_by_delta(rpe_list, est_output_dir)
