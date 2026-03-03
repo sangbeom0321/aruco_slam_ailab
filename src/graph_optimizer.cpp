@@ -988,6 +988,7 @@ public:
             // ── Range filter: 원거리 관측은 depth 오차가 커서 제외 ──
             double range = measurement.translation().norm();
             if (range > maxArucoRange_) {
+                RCLCPP_DEBUG(get_logger(), "[ArUco] M%d skipped: range=%.2fm > max=%.1fm", mid, range, maxArucoRange_);
                 continue;
             }
 
@@ -1001,7 +1002,9 @@ public:
             double viewing_angle = std::acos(std::clamp(cos_angle, 0.0, 1.0));
 
             if (viewing_angle < minViewingAngle_) {
-                continue;  // 정면 ±15° 이내, PnP depth 불안정 → 스킵
+                RCLCPP_DEBUG(get_logger(), "[ArUco] M%d skipped: viewing_angle=%.1fdeg < min=%.1fdeg",
+                             mid, viewing_angle * 180.0 / M_PI, minViewingAngle_ * 180.0 / M_PI);
+                continue;
             }
 
             // ── Dynamic noise model ──

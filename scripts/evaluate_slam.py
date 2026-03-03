@@ -62,9 +62,11 @@ except ImportError:
 
 # ─────────────────────────────────────────────
 # Gazebo 마커 GT 위치 (gazebo_aruco.launch.py)
-# Gazebo 좌표계 (X, Y) — Z는 0.40m
+# 박스 중심 좌표 (X, Y). 마커는 -X face에 부착 (중심에서 0.251m offset)
+# 각 박스 yaw = atan2(center_y - y, center_x - x) + π
+# center = (1.495, -2.425)
 # ─────────────────────────────────────────────
-GAZEBO_MARKER_POSITIONS = {
+GAZEBO_BOX_CENTERS = {
     11: (0.0, 3.0),
     12: (1.9, 3.0),
     13: (1.9, -1.5),
@@ -76,6 +78,31 @@ GAZEBO_MARKER_POSITIONS = {
     19: (-1.9, 3.0),
     20: (-1.7, -1.5),
 }
+MARKER_FACE_OFFSET = 0.251  # 박스 중심 → -X face (마커 부착면) 거리 (m)
+BOX_SIZE = 0.50  # 박스 한 변 길이 (m)
+BOX_CENTER = (1.495, -2.425)  # 모든 박스가 바라보는 중심점
+
+
+def compute_marker_gt_positions():
+    """박스 중심 + yaw 기반으로 실제 마커 면 위치와 방향을 계산."""
+    result = {}
+    cx, cy = BOX_CENTER
+    for mid, (bx, by) in GAZEBO_BOX_CENTERS.items():
+        dx = cx - bx
+        dy = cy - by
+        yaw = math.atan2(dy, dx) + math.pi  # 박스 +X 방향 (마커 반대편)
+        # 마커 면 위치: 박스 중심에서 -X 방향으로 0.251m
+        face_x = bx - MARKER_FACE_OFFSET * math.cos(yaw)
+        face_y = by - MARKER_FACE_OFFSET * math.sin(yaw)
+        # 마커 법선 방향 (마커가 바라보는 방향) = -X = yaw + π = toward center
+        normal_yaw = math.atan2(dy, dx)
+        result[mid] = {"face": (face_x, face_y), "box": (bx, by),
+                        "yaw": yaw, "normal_yaw": normal_yaw}
+    return result
+
+
+GAZEBO_MARKER_POSITIONS = {mid: v["face"]
+                           for mid, v in compute_marker_gt_positions().items()}
 
 # GT 토픽 후보 (우선순위 순)
 GT_TOPIC_CANDIDATES = ["/odom_gt", "/w_odom", "/odom"]
@@ -572,14 +599,41 @@ def plot_trajectories_2d(traj_gt, traj_est_dict, output_dir, landmarks=None,
         ax.plot(xy[:, 0], xy[:, 1], "-", color=color, linewidth=1.5,
                 label=name, alpha=0.8, zorder=2)
 
-    # 랜드마크
+    # 랜드마크 (사각형 + 헤딩 화살표)
     if landmarks:
+        from matplotlib.patches import FancyArrowPatch
         gt_lm = landmarks.get("gt_landmarks", {})
         est_lm = landmarks.get("est_landmarks", {})
+        marker_info = compute_marker_gt_positions()
+
         for mid, pos in gt_lm.items():
-            ax.plot(pos[0], pos[1], "k^", markersize=8, zorder=4)
+            # GT 마커: 사각형 (박스 투영) + 법선 방향 화살표
+            if mid in marker_info:
+                info = marker_info[mid]
+                box_x, box_y = info["box"]
+                yaw = info["yaw"]
+                normal_yaw = info["normal_yaw"]
+                half = BOX_SIZE / 2.0
+                # 박스 꼭짓점 (로컬 → 월드 회전)
+                corners_local = np.array([
+                    [-half, -half], [half, -half],
+                    [half, half], [-half, half], [-half, -half]])
+                cos_y, sin_y = np.cos(yaw), np.sin(yaw)
+                corners_world = np.column_stack([
+                    box_x + corners_local[:, 0]*cos_y - corners_local[:, 1]*sin_y,
+                    box_y + corners_local[:, 0]*sin_y + corners_local[:, 1]*cos_y])
+                ax.plot(corners_world[:, 0], corners_world[:, 1],
+                        "k-", linewidth=1.0, zorder=4)
+                # 마커 면 위치에 법선 화살표 (마커가 바라보는 방향)
+                arrow_len = 0.3
+                ax.annotate("", xy=(pos[0] + arrow_len*np.cos(normal_yaw),
+                                    pos[1] + arrow_len*np.sin(normal_yaw)),
+                            xytext=(pos[0], pos[1]),
+                            arrowprops=dict(arrowstyle="->", color="black",
+                                            lw=1.5), zorder=5)
             ax.annotate(f"M{mid}", (pos[0], pos[1]), fontsize=7,
-                        xytext=(3, 3), textcoords="offset points")
+                        xytext=(3, 3), textcoords="offset points", zorder=6)
+
         for mid, pos in est_lm.items():
             ax.plot(pos[0], pos[1], "m^", markersize=6, alpha=0.7, zorder=4)
 
@@ -708,10 +762,31 @@ def plot_landmark_comparison(lm_result, output_dir):
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
 
-    # 2D 위치 비교
+    # 2D 위치 비교 (사각형 + 헤딩)
+    marker_info = compute_marker_gt_positions()
     for mid in sorted(gt_lm.keys()):
         gt_pos = gt_lm[mid]
-        ax1.plot(gt_pos[0], gt_pos[1], "k^", markersize=10)
+        # GT 마커 박스 사각형
+        if mid in marker_info:
+            info = marker_info[mid]
+            box_x, box_y = info["box"]
+            yaw = info["yaw"]
+            normal_yaw = info["normal_yaw"]
+            half = BOX_SIZE / 2.0
+            corners_local = np.array([
+                [-half, -half], [half, -half],
+                [half, half], [-half, half], [-half, -half]])
+            cos_y, sin_y = np.cos(yaw), np.sin(yaw)
+            corners_world = np.column_stack([
+                box_x + corners_local[:, 0]*cos_y - corners_local[:, 1]*sin_y,
+                box_y + corners_local[:, 0]*sin_y + corners_local[:, 1]*cos_y])
+            ax1.plot(corners_world[:, 0], corners_world[:, 1],
+                     "k-", linewidth=1.0, zorder=3)
+            ax1.annotate("", xy=(gt_pos[0] + 0.3*np.cos(normal_yaw),
+                                 gt_pos[1] + 0.3*np.sin(normal_yaw)),
+                         xytext=(gt_pos[0], gt_pos[1]),
+                         arrowprops=dict(arrowstyle="->", color="black", lw=1.5),
+                         zorder=4)
         ax1.annotate(f"GT {mid}", (gt_pos[0], gt_pos[1]),
                      fontsize=7, xytext=(-10, 8), textcoords="offset points")
         if mid in est_lm:

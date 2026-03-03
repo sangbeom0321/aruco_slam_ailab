@@ -54,7 +54,7 @@
     aruco_trans_noise: 0.08    # 기본 σ (거리/각도별 dynamic scaling 적용됨)
     aruco_rot_noise: 0.50      # rotation 느슨하게 → heading은 IMU 주도
     aruco_max_range: 4.0       # 최대 관측 거리 (m), 초과 시 무시
-    aruco_min_viewing_angle: 0.26  # 최소 viewing angle (rad, ~15°), 정면 관측 스킵
+    aruco_min_viewing_angle: 0.17  # 최소 viewing angle (rad, ~10°), 정면 관측 스킵
 
     # Wheel odometry BetweenFactor parameters
     # 역할: position(x,y) 강인함. heading은 IMU에 맡김.
