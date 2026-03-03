@@ -76,9 +76,21 @@ def quat_to_yaw(qx, qy, qz, qw):
 
 def _get_reader_and_typestore(bag_path):
     from rosbags.highlevel import AnyReader
-    from rosbags.typesys import Stores, get_typestore
+    from rosbags.typesys import Stores, get_typestore, get_types_from_msg
     from pathlib import Path
     typestore = get_typestore(Stores.ROS2_HUMBLE)
+
+    # Register custom aruco_sam_ailab message types
+    add_types = {}
+    add_types.update(get_types_from_msg(
+        'int32 id\ngeometry_msgs/Pose pose',
+        'aruco_sam_ailab/msg/MarkerObservation'))
+    add_types.update(get_types_from_msg(
+        'std_msgs/Header header\n'
+        'aruco_sam_ailab/msg/MarkerObservation[] markers',
+        'aruco_sam_ailab/msg/MarkerArray'))
+    typestore.register(add_types)
+
     reader = AnyReader([Path(bag_path)], default_typestore=typestore)
     return reader, typestore
 
@@ -106,6 +118,34 @@ def extract_odom_with_ts(bag_path: str, topic: str):
 
     print(f"  Extracted {len(xs)} poses from '{topic}'")
     return np.array(ts_list), np.array(xs), np.array(ys), np.array(yaws)
+
+
+def extract_aruco_detection_times(bag_path: str,
+                                  topic: str = "/aruco_poses"):
+    """Extract timestamps when ArUco markers were/weren't detected.
+
+    Returns (det_ts, nodet_ts) — numpy arrays of timestamps.
+    """
+    reader, typestore = _get_reader_and_typestore(bag_path)
+    det_ts, nodet_ts = [], []
+
+    with reader:
+        connections = [c for c in reader.connections if c.topic == topic]
+        if not connections:
+            print(f"  Topic '{topic}' not found for detection times")
+            return np.array([]), np.array([])
+
+        print(f"  Extracting detection times from '{topic}' ...")
+        for conn, timestamp, rawdata in reader.messages(connections=connections):
+            msg = typestore.deserialize_cdr(rawdata, conn.msgtype)
+            t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+            if len(msg.markers) > 0:
+                det_ts.append(t)
+            else:
+                nodet_ts.append(t)
+
+    print(f"  Detection: {len(det_ts)} frames, No-detection: {len(nodet_ts)} frames")
+    return np.array(det_ts), np.array(nodet_ts)
 
 
 def extract_slam_landmarks(bag_path: str,
@@ -445,6 +485,38 @@ def set_common_limits(ax, gt_x, gt_y, slam_x=None, slam_y=None):
     ax.set_ylim(min(all_y) - pad, max(all_y) + pad)
 
 
+def compute_blind_mask(gt_ts, det_ts, threshold=0.5):
+    """True where nearest ArUco detection is > threshold seconds away."""
+    if len(det_ts) == 0:
+        return np.ones(len(gt_ts), dtype=bool)
+    idx = np.searchsorted(det_ts, gt_ts)
+    idx = np.clip(idx, 0, len(det_ts) - 1)
+    dist = np.abs(det_ts[idx] - gt_ts)
+    idx_prev = np.clip(idx - 1, 0, len(det_ts) - 1)
+    dist_prev = np.abs(det_ts[idx_prev] - gt_ts)
+    nearest_dist = np.minimum(dist, dist_prev)
+    return nearest_dist > threshold
+
+
+def draw_blind_zones(ax, x, y, blind_mask):
+    """Overlay red segments on trajectory where no marker was detected."""
+    if not np.any(blind_mask):
+        return
+    changes = np.diff(blind_mask.astype(int))
+    starts = list(np.where(changes == 1)[0] + 1)
+    ends = list(np.where(changes == -1)[0] + 1)
+    if blind_mask[0]:
+        starts.insert(0, 0)
+    if blind_mask[-1]:
+        ends.append(len(blind_mask))
+    for s, e in zip(starts, ends):
+        # Extend by 1 on each side for visual continuity
+        s2 = max(0, s - 1)
+        e2 = min(len(x), e + 1)
+        ax.plot(x[s2:e2], y[s2:e2], "-", color="red", linewidth=3.5,
+                alpha=0.5, zorder=3, solid_capstyle="round")
+
+
 def add_metrics_text(ax, ape, drift, lm, title=""):
     """Add metrics summary as text box on subplot."""
     lines = []
@@ -484,11 +556,16 @@ def main():
     slam_lm_aligned = {}
     R = t = None
     align_angle = 0.0
+    det_ts = np.array([])
+    gt_blind_mask = None
 
     if args.bag:
         gt_ts, gt_x, gt_y, gt_yaw = extract_odom_with_ts(args.bag, "/odom_gt")
         slam_ts, slam_x, slam_y, slam_yaw = extract_odom_with_ts(
             args.bag, args.slam_topic)
+        det_ts, _ = extract_aruco_detection_times(args.bag)
+        if gt_ts is not None and len(det_ts) > 0:
+            gt_blind_mask = compute_blind_mask(gt_ts, det_ts, threshold=0.5)
 
         # ── Align SLAM → Gazebo ──
         if (gt_ts is not None and slam_ts is not None
@@ -592,6 +669,10 @@ def main():
             ax.plot(gx[0], gy[0], "go", markersize=8, zorder=7)
             ax.plot(gx[-1], gy[-1], "g^", markersize=8, zorder=7)
 
+            # Overlay blind zones (no ArUco detection)
+            if gt_blind_mask is not None:
+                draw_blind_zones(ax, gx, gy, gt_blind_mask[gt_sl])
+
         if slam_aligned_x is not None:
             sx, sy = slam_aligned_x[slam_sl], slam_aligned_y[slam_sl]
             ax.plot(sx, sy, "-", color="purple", linewidth=1.2, alpha=0.8, zorder=2)
@@ -629,6 +710,10 @@ def main():
             plt.Line2D([0], [0], color="gray", linestyle="--",
                        linewidth=0.8, label="Landmark Error"),
         ])
+    if gt_blind_mask is not None and np.any(gt_blind_mask):
+        legend_elements.append(
+            plt.Line2D([0], [0], color="red", linewidth=3.5, alpha=0.5,
+                       label="No ArUco Detection"))
     legend_elements.extend([
         plt.Line2D([0], [0], color="green", marker="o", linestyle="None",
                    markersize=6, label="Start"),
