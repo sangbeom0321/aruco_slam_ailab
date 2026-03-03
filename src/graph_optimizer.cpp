@@ -63,6 +63,7 @@ public:
     rclcpp::Time lastKeyframeTime_{0, 0, RCL_ROS_TIME};
     std::set<int> lastVisibleMarkers_;
     double keyframeTimeThresh_;
+    int lastMarkerFrame_ = 0;       // 마지막으로 마커를 관측한 frameIdx
 
     // ═══ Raw IMU queue (guarded by queueMtx_) ═══
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr subRawImu_;
@@ -865,6 +866,11 @@ public:
         // 6. Landmark factors
         addLandmarkFactors(frameIdx_, markers);
 
+        // 마커 관측 공백 추적
+        if (!markers.markers.empty()) {
+            lastMarkerFrame_ = frameIdx_;
+        }
+
         // 7. Optimize
         try {
             isam_.update(graphFactors_, graphValues_);
@@ -923,10 +929,11 @@ public:
             double corrYaw = std::abs(currentEstimate_.rotation().yaw() - predictedPose.rotation().yaw());
             if (corrYaw > M_PI) corrYaw = 2.0 * M_PI - corrYaw;
 
+            int gapFrames = frameIdx_ - lastMarkerFrame_;
             if (corrTrans > 0.3 || corrYaw > 0.2) {
                 RCLCPP_WARN(get_logger(),
-                    "[ISAM2] LARGE correction frame=%d: trans=%.3fm yaw=%.1fdeg markers=%zu",
-                    frameIdx_, corrTrans, corrYaw * 180.0 / M_PI, markers.markers.size());
+                    "[ISAM2] LARGE correction frame=%d: trans=%.3fm yaw=%.1fdeg markers=%zu gap=%d",
+                    frameIdx_, corrTrans, corrYaw * 180.0 / M_PI, markers.markers.size(), gapFrames);
             }
 
             RCLCPP_DEBUG(get_logger(),
