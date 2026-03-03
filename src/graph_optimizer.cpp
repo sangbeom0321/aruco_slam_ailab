@@ -346,7 +346,7 @@ public:
         // Landmark prior: soft regularization → 관측이 지배하도록 큰 σ 사용
         // 초기 추정값이 로봇 pose 오차를 포함하므로 tight prior는 오히려 해로움
         landmarkPriorNoise_ = gtsam::noiseModel::Diagonal::Sigmas(
-            (gtsam::Vector(6) << 0.1, 0.1, 0.5, 1.0, 1.0, 0.1).finished());
+            (gtsam::Vector(6) << 0.5, 0.5, 1.0, 10.0, 10.0, 0.5).finished());
 
         // Wheel odom noise: GTSAM Pose3 tangent order [rot_x, rot_y, rot_z, trans_x, trans_y, trans_z]
         if (useWheelOdom) {
@@ -1034,8 +1034,10 @@ public:
                         initialLandmarkPose = currentEstimate_.compose(measurement);
                     }
                     graphValues_.insert(landmarkKey, initialLandmarkPose);
-                    // PriorFactor 제거: 첫 관측 시 drift가 초기 추정에 반영되어
-                    // prior가 잘못된 위치로 끌어당기는 주범. BetweenFactor만으로 제약.
+                    // 매우 느슨한 prior (σ=10m): 발산 방지 regularizer 역할만
+                    // 관측이 쌓이면 BetweenFactor가 지배하여 drift 보정됨
+                    graphFactors_.add(gtsam::PriorFactor<gtsam::Pose3>(
+                        landmarkKey, initialLandmarkPose, landmarkPriorNoise_));
                 } else {
                     landmarkKey = landmarkIdToKey_[mid];
                 }
