@@ -555,6 +555,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--bag", type=str, default=None)
     parser.add_argument("--slam-topic", type=str, default="/aruco_slam/odom")
+    parser.add_argument("--ekf-topic", type=str, default="/ekf/odom")
     parser.add_argument("--output-dir", type=str, default=None,
                         help="Directory to save results (plot + CSV)")
     args = parser.parse_args()
@@ -563,9 +564,9 @@ def main():
     gt_ts = gt_x = gt_y = gt_yaw = None
     slam_ts = slam_x = slam_y = slam_yaw = None
     slam_aligned_x = slam_aligned_y = slam_aligned_yaw = None
+    ekf_ts = ekf_x = ekf_y = ekf_yaw = None
+    ekf_aligned_x = ekf_aligned_y = ekf_aligned_yaw = None
     slam_lm_aligned = {}
-    R = t = None
-    align_angle = 0.0
     det_ts = np.array([])
     gt_blind_mask = None
 
@@ -573,34 +574,48 @@ def main():
         gt_ts, gt_x, gt_y, gt_yaw = extract_odom_with_ts(args.bag, "/odom_gt")
         slam_ts, slam_x, slam_y, slam_yaw = extract_odom_with_ts(
             args.bag, args.slam_topic)
+        ekf_ts, ekf_x, ekf_y, ekf_yaw = extract_odom_with_ts(
+            args.bag, args.ekf_topic)
         det_ts, _ = extract_aruco_detection_times(args.bag)
         if gt_ts is not None and len(det_ts) > 0:
             gt_blind_mask = compute_blind_mask(gt_ts, det_ts, threshold=0.5)
 
+        def _align_to_gt(est_ts, est_x, est_y, est_yaw, label):
+            """Umeyama alignment of estimated trajectory to GT.
+
+            Returns (aligned_x, aligned_y, aligned_yaw, R, t, angle).
+            """
+            if (gt_ts is None or est_ts is None
+                    or len(gt_ts) == 0 or len(est_ts) == 0):
+                return None, None, None, None, None, 0.0
+            idx_est, idx_gt = sync_by_timestamp(est_ts, gt_ts, max_diff=0.1)
+            print(f"  [{label}] Synced {len(idx_est)} pose pairs")
+            if len(idx_est) < 3:
+                return None, None, None, None, None, 0.0
+            src = np.column_stack([est_x[idx_est], est_y[idx_est]])
+            dst = np.column_stack([gt_x[idx_gt], gt_y[idx_gt]])
+            R, t = umeyama_2d(src, dst)
+            angle = math.atan2(R[1, 0], R[0, 0])
+            aligned = apply_transform_2d(R, t,
+                                         np.column_stack([est_x, est_y]))
+            return aligned[:, 0], aligned[:, 1], est_yaw + angle, R, t, angle
+
         # ── Align SLAM → Gazebo ──
-        if (gt_ts is not None and slam_ts is not None
-                and len(gt_ts) > 0 and len(slam_ts) > 0):
-            idx_slam, idx_gt = sync_by_timestamp(slam_ts, gt_ts, max_diff=0.1)
-            print(f"  Synced {len(idx_slam)} pose pairs")
+        (slam_aligned_x, slam_aligned_y, slam_aligned_yaw,
+         R_slam, t_slam, align_angle_slam) = _align_to_gt(
+            slam_ts, slam_x, slam_y, slam_yaw, "SLAM")
 
-            if len(idx_slam) >= 3:
-                src = np.column_stack([slam_x[idx_slam], slam_y[idx_slam]])
-                dst = np.column_stack([gt_x[idx_gt], gt_y[idx_gt]])
-                R, t = umeyama_2d(src, dst)
-                align_angle = math.atan2(R[1, 0], R[0, 0])
+        # SLAM landmarks
+        if R_slam is not None:
+            slam_lm_raw = extract_slam_landmarks(args.bag)
+            for mid, (lx, ly, lyaw) in slam_lm_raw.items():
+                pt = apply_transform_2d(R_slam, t_slam, np.array([[lx, ly]]))[0]
+                slam_lm_aligned[mid] = (pt[0], pt[1], lyaw + align_angle_slam)
 
-                # Transform full SLAM trajectory
-                slam_all = np.column_stack([slam_x, slam_y])
-                slam_aligned = apply_transform_2d(R, t, slam_all)
-                slam_aligned_x = slam_aligned[:, 0]
-                slam_aligned_y = slam_aligned[:, 1]
-                slam_aligned_yaw = slam_yaw + align_angle
-
-                # SLAM landmarks
-                slam_lm_raw = extract_slam_landmarks(args.bag)
-                for mid, (lx, ly, lyaw) in slam_lm_raw.items():
-                    pt = apply_transform_2d(R, t, np.array([[lx, ly]]))[0]
-                    slam_lm_aligned[mid] = (pt[0], pt[1], lyaw + align_angle)
+        # ── Align EKF → Gazebo ──
+        (ekf_aligned_x, ekf_aligned_y, ekf_aligned_yaw,
+         _, _, _) = _align_to_gt(
+            ekf_ts, ekf_x, ekf_y, ekf_yaw, "EKF")
 
     # ── Compute metrics (full + per-loop) ──
     gt_split = slam_split = None
@@ -618,14 +633,15 @@ def main():
         # Re-sync on aligned data for metrics
         idx_s, idx_g = sync_by_timestamp(slam_ts, gt_ts, max_diff=0.1)
 
-        def _metrics_for_slice(name, s_mask, g_indices):
+        def _metrics_for_slice(name, s_mask, g_indices,
+                               est_ax, est_ay, est_ayaw):
             """Compute APE, RPE, Drift for a subset of synced indices."""
             gx = gt_x[g_indices]
             gy = gt_y[g_indices]
             gyaw = gt_yaw[g_indices]
-            sx = slam_aligned_x[s_mask]
-            sy = slam_aligned_y[s_mask]
-            syaw = slam_aligned_yaw[s_mask]
+            sx = est_ax[s_mask]
+            sy = est_ay[s_mask]
+            syaw = est_ayaw[s_mask]
 
             ape = compute_ape(gx, gy, gyaw, sx, sy, syaw)
             rpe_list = [compute_rpe(gx, gy, gyaw, sx, sy, syaw, d)
@@ -635,84 +651,94 @@ def main():
             return {"ape": ape, "rpe": rpe_list, "drift": drift, "lm": lm,
                     "name": name}
 
-        # Full
-        metrics_full = _metrics_for_slice("Full", idx_s, idx_g)
+        # Full (SLAM)
+        metrics_full = _metrics_for_slice(
+            "Full", idx_s, idx_g,
+            slam_aligned_x, slam_aligned_y, slam_aligned_yaw)
         print_summary(metrics_full["ape"], metrics_full["rpe"],
                       metrics_full["drift"], metrics_full["lm"], args.slam_topic)
 
         # Loop 1: synced pairs where slam_ts < split_time
         mask1 = slam_ts[idx_s] < split_time
         if mask1.sum() > 10:
-            metrics_loop1 = _metrics_for_slice("Loop 1", idx_s[mask1], idx_g[mask1])
+            metrics_loop1 = _metrics_for_slice(
+                "Loop 1", idx_s[mask1], idx_g[mask1],
+                slam_aligned_x, slam_aligned_y, slam_aligned_yaw)
 
         # Loop 2: synced pairs where slam_ts >= split_time
         mask2 = slam_ts[idx_s] >= split_time
         if mask2.sum() > 10:
-            metrics_loop2 = _metrics_for_slice("Loop 2", idx_s[mask2], idx_g[mask2])
+            metrics_loop2 = _metrics_for_slice(
+                "Loop 2", idx_s[mask2], idx_g[mask2],
+                slam_aligned_x, slam_aligned_y, slam_aligned_yaw)
 
-    # ── Plot: single figure ──
-    fig, ax = plt.subplots(1, 1, figsize=(12, 11))
-    ax.set_aspect("equal")
-    ax.set_title("GT vs SLAM Trajectory", fontsize=13)
-    ax.set_xlabel("X (m)")
-    ax.set_ylabel("Y (m)")
-    ax.grid(True, alpha=0.3)
+    # ── Helper: draw a single trajectory plot ──
+    def _make_trajectory_plot(est_aligned_x, est_aligned_y, est_label,
+                              est_color, show_landmarks):
+        fig, ax = plt.subplots(1, 1, figsize=(12, 11))
+        ax.set_aspect("equal")
+        ax.set_title(f"GT vs {est_label}", fontsize=13)
+        ax.set_xlabel("X (m)")
+        ax.set_ylabel("Y (m)")
+        ax.grid(True, alpha=0.3)
 
-    if gt_x is not None:
-        ax.plot(gt_x, gt_y, "-", color="green", linewidth=1.5, alpha=0.8,
-                zorder=2, label="GT (/odom_gt)")
-        ax.plot(gt_x[0], gt_y[0], "o", color="green", markersize=8, zorder=7)
-        ax.plot(gt_x[-1], gt_y[-1], "^", color="green", markersize=8, zorder=7)
+        if gt_x is not None:
+            ax.plot(gt_x, gt_y, "-", color="green", linewidth=1.5, alpha=0.8,
+                    zorder=2, label="GT (/odom_gt)")
+            ax.plot(gt_x[0], gt_y[0], "o", color="green", markersize=8,
+                    zorder=7)
+            ax.plot(gt_x[-1], gt_y[-1], "^", color="green", markersize=8,
+                    zorder=7)
+            if gt_blind_mask is not None:
+                draw_blind_zones(ax, gt_x, gt_y, gt_blind_mask)
 
-        if gt_blind_mask is not None:
-            draw_blind_zones(ax, gt_x, gt_y, gt_blind_mask)
+        if est_aligned_x is not None:
+            ax.plot(est_aligned_x, est_aligned_y, "-", color=est_color,
+                    linewidth=1.2, alpha=0.8, zorder=2, label=est_label)
+            ax.plot(est_aligned_x[0], est_aligned_y[0], "o",
+                    color=est_color, markersize=6, zorder=7)
+            ax.plot(est_aligned_x[-1], est_aligned_y[-1], "^",
+                    color=est_color, markersize=6, zorder=7)
 
-    if slam_aligned_x is not None:
-        ax.plot(slam_aligned_x, slam_aligned_y, "-", color="purple",
-                linewidth=1.2, alpha=0.8, zorder=2,
-                label=f"SLAM ({args.slam_topic})")
-        ax.plot(slam_aligned_x[0], slam_aligned_y[0], "o", color="purple",
-                markersize=6, zorder=7)
-        ax.plot(slam_aligned_x[-1], slam_aligned_y[-1], "^", color="purple",
-                markersize=6, zorder=7)
+        lm = slam_lm_aligned if show_landmarks else None
+        draw_boxes_and_markers(ax, lm)
+        set_common_limits(ax, gt_x, gt_y, est_aligned_x, est_aligned_y)
 
-    draw_boxes_and_markers(ax, slam_lm_aligned)
-    set_common_limits(ax, gt_x, gt_y, slam_aligned_x, slam_aligned_y)
-
-    # Legend
-    handles, labels = ax.get_legend_handles_labels()
-    handles.extend([
-        mpatches.Patch(facecolor="moccasin", edgecolor="darkorange",
-                       label="GT Box"),
-        plt.Line2D([0], [0], color="red", linewidth=3,
-                   label="GT Marker Face"),
-        plt.Line2D([0], [0], color="blue", linewidth=1.2, marker=">",
-                   markersize=5, label="GT Normal"),
-    ])
-    if slam_lm_aligned:
+        # Legend
+        handles, _ = ax.get_legend_handles_labels()
         handles.extend([
-            plt.Line2D([0], [0], color="magenta", marker="D",
-                       linestyle="None", markersize=6,
-                       markeredgecolor="black", markeredgewidth=0.5,
-                       label="SLAM Landmark"),
-            plt.Line2D([0], [0], color="magenta", linewidth=1.2, marker=">",
-                       markersize=5, label="SLAM Normal"),
-            plt.Line2D([0], [0], color="gray", linestyle="--",
-                       linewidth=0.8, label="Landmark Error"),
+            mpatches.Patch(facecolor="moccasin", edgecolor="darkorange",
+                           label="GT Box"),
+            plt.Line2D([0], [0], color="red", linewidth=3,
+                       label="GT Marker Face"),
+            plt.Line2D([0], [0], color="blue", linewidth=1.2, marker=">",
+                       markersize=5, label="GT Normal"),
         ])
-    if gt_blind_mask is not None and np.any(gt_blind_mask):
-        handles.append(
-            plt.Line2D([0], [0], color="red", linewidth=3.5, alpha=0.5,
-                       label="Blind Zone"))
-    handles.extend([
-        plt.Line2D([0], [0], color="gray", marker="o", linestyle="None",
-                   markersize=6, label="Start"),
-        plt.Line2D([0], [0], color="gray", marker="^", linestyle="None",
-                   markersize=6, label="End"),
-    ])
-    ax.legend(handles=handles, loc="upper right", fontsize=8, framealpha=0.9)
-
-    plt.tight_layout()
+        if show_landmarks and slam_lm_aligned:
+            handles.extend([
+                plt.Line2D([0], [0], color="magenta", marker="D",
+                           linestyle="None", markersize=6,
+                           markeredgecolor="black", markeredgewidth=0.5,
+                           label="SLAM Landmark"),
+                plt.Line2D([0], [0], color="magenta", linewidth=1.2,
+                           marker=">", markersize=5, label="SLAM Normal"),
+                plt.Line2D([0], [0], color="gray", linestyle="--",
+                           linewidth=0.8, label="Landmark Error"),
+            ])
+        if gt_blind_mask is not None and np.any(gt_blind_mask):
+            handles.append(
+                plt.Line2D([0], [0], color="red", linewidth=3.5, alpha=0.5,
+                           label="Blind Zone"))
+        handles.extend([
+            plt.Line2D([0], [0], color="gray", marker="o", linestyle="None",
+                       markersize=6, label="Start"),
+            plt.Line2D([0], [0], color="gray", marker="^", linestyle="None",
+                       markersize=6, label="End"),
+        ])
+        ax.legend(handles=handles, loc="upper right", fontsize=8,
+                  framealpha=0.9)
+        plt.tight_layout()
+        return fig
 
     # Determine output directory
     if args.output_dir:
@@ -721,9 +747,23 @@ def main():
     else:
         out_dir = os.path.dirname(os.path.abspath(__file__))
 
-    out_path = os.path.join(out_dir, "trajectory_plot.png")
-    fig.savefig(out_path, dpi=150)
-    print(f"  Plot saved: {out_path}")
+    # SLAM plot
+    fig_slam = _make_trajectory_plot(
+        slam_aligned_x, slam_aligned_y,
+        f"SLAM ({args.slam_topic})", "purple", show_landmarks=True)
+    slam_path = os.path.join(out_dir, "trajectory_slam.png")
+    fig_slam.savefig(slam_path, dpi=150)
+    plt.close(fig_slam)
+    print(f"  Plot saved: {slam_path}")
+
+    # EKF plot
+    fig_ekf = _make_trajectory_plot(
+        ekf_aligned_x, ekf_aligned_y,
+        f"EKF ({args.ekf_topic})", "darkorange", show_landmarks=False)
+    ekf_path = os.path.join(out_dir, "trajectory_ekf.png")
+    fig_ekf.savefig(ekf_path, dpi=150)
+    plt.close(fig_ekf)
+    print(f"  Plot saved: {ekf_path}")
 
     # Save CSV
     if metrics_full and args.output_dir:
