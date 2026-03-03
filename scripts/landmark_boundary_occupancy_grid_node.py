@@ -244,8 +244,8 @@ class LandmarkBoundaryOccupancyGridNode(Node):
                 points[j][0], points[j][1]
             )
 
-        # 수동 장애물 마킹 (반경 0.3m 원형)
-        obstacle_radius_cells = max(1, int(0.3 / self.resolution))
+        # 수동 장애물 마킹 (반경 0.1m 원형)
+        obstacle_radius_cells = max(1, int(0.1 / self.resolution))
         for (ox, oy) in self.manual_obstacles:
             ogx, ogy = self._world_to_grid(ox, oy, min_x, min_y)
             for dx in range(-obstacle_radius_cells, obstacle_radius_cells + 1):
