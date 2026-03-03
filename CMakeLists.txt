@@ -105,6 +105,11 @@ install(PROGRAMS scripts/ego_state_publisher.py
     DESTINATION lib/${PROJECT_NAME}
 )
 
+# Install SLAM evaluation script (rosbag post-processing, not a ROS node)
+install(PROGRAMS scripts/evaluate_slam.py
+    DESTINATION lib/${PROJECT_NAME}
+)
+
 # C++ executables
 # Note: Source files will be created in Step 3-4
 # For now, we prepare the structure
