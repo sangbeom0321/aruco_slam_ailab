@@ -51,7 +51,7 @@
     aruco_trans_noise: 0.10    # 기본 σ (거리/각도별 dynamic scaling 적용됨)
     aruco_rot_noise: 0.50      # rotation 느슨하게 → heading은 IMU 주도
     aruco_max_range: 3.0       # 최대 관측 거리 (m), 초과 시 무시 (4.0→3.0: 원거리 노이즈 관측 차단)
-    aruco_min_viewing_angle: 0.44  # 최소 viewing angle (rad, ~25°), 정면 관측 스킵 (10°→25°: 직진 시 systematic depth bias 차단)
+    aruco_min_viewing_angle: 0.0   # 정면 관측 필터 해제 (모든 각도 허용)
 
     # Wheel odometry BetweenFactor parameters
     # 역할: position(x,y) 강인함. heading은 IMU에 맡김.
@@ -71,8 +71,10 @@
     keyframe_angle_threshold: 0.1
 
     # ISAM2 parameters
-    isam_relinearize_threshold: 0.1
-    isam_relinearize_skip: 1
+    # threshold↑ → 재선형화 빈도 감소 → 큰 그래프 점프 완화 (0.1→0.5)
+    # skip↑ → N번 업데이트마다 1번만 재선형화 체크 (1→3)
+    isam_relinearize_threshold: 0.5
+    isam_relinearize_skip: 3
 
     # EKF Smoother: IMU odom + SLAM correction fusion
     # Process noise (σ per √s): how much IMU odom drifts
