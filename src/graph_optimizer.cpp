@@ -138,6 +138,10 @@ public:
     gtsam::noiseModel::Diagonal::shared_ptr obsNoise_;
     gtsam::noiseModel::Diagonal::shared_ptr landmarkPriorNoise_;
 
+    // ═══ ArUco observation filter params ═══
+    double maxArucoRange_;       // 최대 관측 거리 (m), 초과 시 스킵
+    double minViewingAngle_;     // 최소 viewing angle (rad), 정면 관측 스킵
+
     // ═══════════════════════════════════════════════════════════
     //  Constructor
     // ═══════════════════════════════════════════════════════════
@@ -328,15 +332,21 @@ public:
             (gtsam::Vector(6) << imuAccBiasN * 100, imuAccBiasN * 100, imuAccBiasN * 100,
                                   imuGyrBiasN * 10, imuGyrBiasN * 10, imuGyrBiasN * 10).finished());
 
-        // ArUco obsNoise: 2D UGV → roll/pitch/z는 예측 가능 (tight), yaw/x/y는 config 값 사용
-        // roll/pitch: 로봇 flat + 마커 벽 고정 → 상대 자세 안정적
-        // z: 로봇 높이 고정 + 마커 높이 고정 → 높이차 안정적
+        // ArUco obsNoise: 기본 노이즈 (addLandmarkFactors에서 거리/각도별 dynamic noise로 대체됨)
+        // 이 값은 fallback용으로 유지
         obsNoise_ = gtsam::noiseModel::Diagonal::Sigmas(
             (gtsam::Vector(6) << 0.05, 0.05, arucoRotNoise,
                                   arucoTransNoise, arucoTransNoise, 0.03).finished());
-        // Landmark prior: 2D UGV → 랜드마크 높이/기울기는 신뢰, x/y/yaw는 관측 noise 수준
+
+        // ArUco observation filter params
+        maxArucoRange_ = arucoMaxRange;
+        minViewingAngle_ = arucoMinViewingAngle;
+        RCLCPP_INFO(get_logger(), "ArUco filter: max_range=%.1fm, min_viewing_angle=%.1fdeg",
+                    maxArucoRange_, minViewingAngle_ * 180.0 / M_PI);
+        // Landmark prior: soft regularization → 관측이 지배하도록 큰 σ 사용
+        // 초기 추정값이 로봇 pose 오차를 포함하므로 tight prior는 오히려 해로움
         landmarkPriorNoise_ = gtsam::noiseModel::Diagonal::Sigmas(
-            (gtsam::Vector(6) << 0.05, 0.05, 0.15, 0.15, 0.15, 0.05).finished());
+            (gtsam::Vector(6) << 0.1, 0.1, 0.5, 1.0, 1.0, 0.1).finished());
 
         // Wheel odom noise: GTSAM Pose3 tangent order [rot_x, rot_y, rot_z, trans_x, trans_y, trans_z]
         if (useWheelOdom) {
@@ -974,13 +984,44 @@ public:
         for (const auto& marker : markers.markers) {
             int mid = marker.id;
             gtsam::Pose3 measurement = poseMsgToGtsam(marker.pose);
+
+            // ── Range filter: 원거리 관측은 depth 오차가 커서 제외 ──
+            double range = measurement.translation().norm();
+            if (range > maxArucoRange_) {
+                continue;
+            }
+
+            // ── Viewing angle filter ──
+            // marker Z axis (normal, 마커 면에서 외부 방향) in base_link frame
+            Eigen::Vector3d marker_z = measurement.rotation().matrix().col(2);
+            // viewing ray: base_link → marker 방향
+            Eigen::Vector3d view_ray = measurement.translation().normalized();
+            // 정면 관측: marker normal ≈ -view_ray → |cos| ≈ 1
+            double cos_angle = std::abs(marker_z.dot(-view_ray));
+            double viewing_angle = std::acos(std::clamp(cos_angle, 0.0, 1.0));
+
+            if (viewing_angle < minViewingAngle_) {
+                continue;  // 정면 ±15° 이내, PnP depth 불안정 → 스킵
+            }
+
+            // ── Dynamic noise model ──
+            // 거리 비례: 1m→1.3x, 3m→1.9x, 4m→2.2x
+            double range_factor = 1.0 + 0.3 * range;
+            // 정면일수록 depth 불확실: head-on(cos≈1)→2.5x, 45°→1.75x, edge-on(cos≈0)→1x
+            double angle_factor = 1.0 + 1.5 * cos_angle * cos_angle;
+            double sigma_t = arucoTransNoise * range_factor * angle_factor;
+
+            auto dynamicNoise = gtsam::noiseModel::Diagonal::Sigmas(
+                (gtsam::Vector(6) << 0.05, 0.05, arucoRotNoise,
+                                      sigma_t, sigma_t, 0.03).finished());
+
             bool knownLandmark = (landmarkIdToKey_.find(mid) != landmarkIdToKey_.end());
 
             if (isLocalizationMode_) {
                 if (!knownLandmark) continue;
                 gtsam::Key landmarkKey = landmarkIdToKey_[mid];
                 graphFactors_.add(gtsam::BetweenFactor<gtsam::Pose3>(
-                    X(currentFrameIdx), landmarkKey, measurement, obsNoise_));
+                    X(currentFrameIdx), landmarkKey, measurement, dynamicNoise));
             } else {
                 gtsam::Key landmarkKey;
                 if (!knownLandmark) {
@@ -998,7 +1039,7 @@ public:
                     landmarkKey = landmarkIdToKey_[mid];
                 }
                 graphFactors_.add(gtsam::BetweenFactor<gtsam::Pose3>(
-                    X(currentFrameIdx), landmarkKey, measurement, obsNoise_));
+                    X(currentFrameIdx), landmarkKey, measurement, dynamicNoise));
             }
         }
     }

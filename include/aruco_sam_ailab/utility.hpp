@@ -88,7 +88,9 @@ public:
     // ArUco observation parameters
     double arucoTransNoise;
     double arucoRotNoise;
-    
+    double arucoMaxRange;           // 최대 관측 거리 (m), 초과 시 관측 무시
+    double arucoMinViewingAngle;    // 최소 viewing angle (rad), 정면 관측 스킵
+
     // Keyframe policy
     double keyframeTimeInterval;  // seconds
     double keyframeDistanceThreshold;  // meters
@@ -186,10 +188,14 @@ public:
         // ArUco observation parameters
         declare_parameter("aruco_trans_noise", 0.05);
         declare_parameter("aruco_rot_noise", 0.1);
-        
+        declare_parameter("aruco_max_range", 4.0);
+        declare_parameter("aruco_min_viewing_angle", 0.26);  // ~15 deg
+
         get_parameter("aruco_trans_noise", arucoTransNoise);
         get_parameter("aruco_rot_noise", arucoRotNoise);
-        
+        get_parameter("aruco_max_range", arucoMaxRange);
+        get_parameter("aruco_min_viewing_angle", arucoMinViewingAngle);
+
         // Keyframe policy
         declare_parameter("keyframe_time_interval", 2.0);
         declare_parameter("keyframe_distance_threshold", 0.5);
