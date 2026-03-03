@@ -793,16 +793,10 @@ public:
             predictedPose = predictedState.pose();
             predictedVel = predictedState.velocity();
 
-            // [DEBUG] IMU preintegration 결과 확인
-            double prevYaw = currentEstimate_.rotation().yaw();
-            double predYaw = predictedPose.rotation().yaw();
-            auto deltaR = imuPreintegrator_->deltaRij();
-            RCLCPP_INFO(get_logger(),
-                "[IMU DEBUG] %d samples | deltaRot(r=%.4f p=%.4f y=%.4f) | prevYaw=%.3f predYaw=%.3f dYaw=%.4f rad (%.1f deg)"
-                " | gyrBias=(%.5f,%.5f,%.5f)",
-                imuCount,
-                deltaR.roll(), deltaR.pitch(), deltaR.yaw(),
-                prevYaw, predYaw, predYaw - prevYaw, (predYaw - prevYaw) * 180.0 / M_PI,
+            // IMU preintegration delta (DEBUG only)
+            RCLCPP_DEBUG(get_logger(),
+                "[IMU] %d samples | dYaw=%.4f rad | gyrBias=(%.5f,%.5f,%.5f)",
+                imuCount, imuPreintegrator_->deltaRij().yaw(),
                 currentBias_.gyroscope().x(), currentBias_.gyroscope().y(), currentBias_.gyroscope().z());
         } else {
             // No IMU — identity motion (정지 가정)
@@ -924,18 +918,26 @@ public:
                             frameIdx_, WARMUP_FRAMES);
             }
 
+            // 보정 크기 검출: predicted ↔ optimized 차이가 클 때만 WARN
+            double corrTrans = (currentEstimate_.translation() - predictedPose.translation()).norm();
+            double corrYaw = std::abs(currentEstimate_.rotation().yaw() - predictedPose.rotation().yaw());
+            if (corrYaw > M_PI) corrYaw = 2.0 * M_PI - corrYaw;
+
+            if (corrTrans > 0.3 || corrYaw > 0.2) {
+                RCLCPP_WARN(get_logger(),
+                    "[ISAM2] LARGE correction frame=%d: trans=%.3fm yaw=%.1fdeg markers=%zu",
+                    frameIdx_, corrTrans, corrYaw * 180.0 / M_PI, markers.markers.size());
+            }
+
             RCLCPP_INFO(get_logger(),
-                "[ISAM2] frame=%d pos=(%.3f,%.3f) yaw=%.2f imu=%d markers=%zu",
+                "[ISAM2] frame=%d pos=(%.3f,%.3f) yaw=%.2f markers=%zu corr=%.3fm",
                 frameIdx_,
                 currentEstimate_.translation().x(), currentEstimate_.translation().y(),
-                currentEstimate_.rotation().yaw(), imuCount, markers.markers.size());
-            if (enableTopicDebugLog) {
-                RCLCPP_INFO(get_logger(),
-                    "[ISAM2]   vel=(%.2f,%.2f,%.2f) bias_acc=(%.4f,%.4f,%.4f) bias_gyr=(%.5f,%.5f,%.5f)",
-                    currentVelocity_.x(), currentVelocity_.y(), currentVelocity_.z(),
-                    currentBias_.accelerometer().x(), currentBias_.accelerometer().y(), currentBias_.accelerometer().z(),
-                    currentBias_.gyroscope().x(), currentBias_.gyroscope().y(), currentBias_.gyroscope().z());
-            }
+                currentEstimate_.rotation().yaw(), markers.markers.size(), corrTrans);
+            RCLCPP_DEBUG(get_logger(),
+                "[ISAM2]   vel=(%.2f,%.2f,%.2f) bias_gyr=(%.5f,%.5f,%.5f)",
+                currentVelocity_.x(), currentVelocity_.y(), currentVelocity_.z(),
+                currentBias_.gyroscope().x(), currentBias_.gyroscope().y(), currentBias_.gyroscope().z());
         } catch (const std::exception& e) {
             RCLCPP_ERROR(get_logger(), "ISAM2 Update Failed: %s", e.what());
             graphFactors_.resize(0);
@@ -1014,6 +1016,9 @@ public:
             // 정면일수록 depth 불확실: head-on(cos≈1)→2.5x, 45°→1.75x, edge-on(cos≈0)→1x
             double angle_factor = 1.0 + 1.5 * cos_angle * cos_angle;
             double sigma_t = arucoTransNoise * range_factor * angle_factor;
+
+            RCLCPP_DEBUG(get_logger(), "[ArUco] M%d accepted: range=%.2fm σ_t=%.3f (rf=%.2f af=%.2f)",
+                        mid, range, sigma_t, range_factor, angle_factor);
 
             auto gaussianNoise = gtsam::noiseModel::Diagonal::Sigmas(
                 (gtsam::Vector(6) << 0.05, 0.05, arucoRotNoise,
