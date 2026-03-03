@@ -1009,8 +1009,8 @@ public:
             }
 
             // ── Dynamic noise model ──
-            // 제곱 거리 비례 (stereo depth 오차 σ∝z²/fB): 1m→1.15x, 2m→1.6x, 3m→2.35x
-            double range_factor = 1.0 + 0.15 * range * range;
+            // 제곱 거리 비례 (stereo depth 오차 σ∝z²/fB): 1m→1.3x, 2m→2.2x, 3m→3.7x
+            double range_factor = 1.0 + 0.30 * range * range;
             // 정면일수록 depth 불확실: head-on(cos≈1)→2.5x, 45°→1.75x, edge-on(cos≈0)→1x
             double angle_factor = 1.0 + 1.5 * cos_angle * cos_angle;
             double sigma_t = arucoTransNoise * range_factor * angle_factor;
