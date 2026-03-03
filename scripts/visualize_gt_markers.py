@@ -168,12 +168,21 @@ def extract_slam_landmarks(bag_path: str,
     if last_msg is None:
         return {}
 
-    landmarks = {}
+    # sphere(ns="landmarks")에서 위치, arrow(ns="landmark_normal")에서 방향 추출
+    positions = {}  # id -> (x, y)
+    normals = {}    # id -> yaw
     for m in last_msg.markers:
         if m.ns == "landmarks":
-            q = m.pose.orientation
-            yaw = quat_to_yaw(q.x, q.y, q.z, q.w)
-            landmarks[m.id] = (m.pose.position.x, m.pose.position.y, yaw)
+            positions[m.id] = (m.pose.position.x, m.pose.position.y)
+        elif m.ns == "landmark_normal" and len(m.points) >= 2:
+            dx = m.points[1].x - m.points[0].x
+            dy = m.points[1].y - m.points[0].y
+            normals[m.id] = math.atan2(dy, dx)
+
+    landmarks = {}
+    for mid, (px, py) in positions.items():
+        yaw = normals.get(mid, 0.0)
+        landmarks[mid] = (px, py, yaw)
 
     print(f"  Extracted {len(landmarks)} SLAM landmarks from '{topic}'")
     return landmarks
@@ -320,25 +329,36 @@ def compute_drift_rate(gt_x, gt_y, gt_yaw, est_x, est_y, est_yaw):
 
 
 def compute_landmark_accuracy(slam_lm_aligned):
-    """Per-marker error vs GT marker face position."""
+    """Per-marker position & yaw error vs GT marker face."""
     per_marker = {}
-    for mid, (sx, sy, *_) in slam_lm_aligned.items():
+    per_marker_yaw = {}
+    for mid, (sx, sy, syaw) in slam_lm_aligned.items():
         if mid in GAZEBO_BOX_CENTERS:
             bx, by = GAZEBO_BOX_CENTERS[mid]
             gt_mx, gt_my = compute_gt_marker_face(bx, by)
             per_marker[mid] = math.hypot(sx - gt_mx, sy - gt_my)
+            # GT normal: 박스 중심을 향하는 방향
+            gt_normal = math.atan2(BOX_CENTER_GZ[1] - by,
+                                   BOX_CENTER_GZ[0] - bx)
+            yaw_err = abs(normalize_angle(syaw - gt_normal))
+            per_marker_yaw[mid] = math.degrees(yaw_err)
 
     if not per_marker:
-        return {"per_marker": {}, "mean_error": float("nan"),
-                "max_error": float("nan"), "max_error_id": -1}
+        return {"per_marker": {}, "per_marker_yaw": {},
+                "mean_error": float("nan"), "max_error": float("nan"),
+                "mean_yaw_error": float("nan"), "max_error_id": -1}
 
     errors = list(per_marker.values())
+    yaw_errors = list(per_marker_yaw.values())
     max_id = max(per_marker, key=per_marker.get)
     return {
         "per_marker": per_marker,
+        "per_marker_yaw": per_marker_yaw,
         "mean_error": float(np.mean(errors)),
         "max_error": float(np.max(errors)),
         "max_error_id": max_id,
+        "mean_yaw_error": float(np.mean(yaw_errors)),
+        "max_yaw_error": float(np.max(yaw_errors)),
     }
 
 
@@ -377,8 +397,13 @@ def print_summary(ape, rpe_list, drift, lm, slam_topic):
         print("  [Landmark Accuracy]")
         print(f"    Mean Error: {lm['mean_error']:.4f} m")
         print(f"    Max Error:  {lm['max_error']:.4f} m (ID {lm['max_error_id']})")
+        if not math.isnan(lm.get("mean_yaw_error", float("nan"))):
+            print(f"    Mean Yaw Error: {lm['mean_yaw_error']:.2f}\u00b0")
+            print(f"    Max Yaw Error:  {lm['max_yaw_error']:.2f}\u00b0")
+        per_yaw = lm.get("per_marker_yaw", {})
         for mid, err in sorted(lm["per_marker"].items()):
-            print(f"      Marker {mid}: {err:.4f} m")
+            yaw_str = f"  yaw: {per_yaw[mid]:.1f}\u00b0" if mid in per_yaw else ""
+            print(f"      Marker {mid}: {err:.4f} m{yaw_str}")
     print("=" * 62)
     print()
 
@@ -413,8 +438,17 @@ def save_metrics_csv(filepath, metrics_full, metrics_loop1, metrics_loop2):
         if lm and not math.isnan(lm.get("mean_error", float("nan"))):
             rows.append((f"{prefix}/landmark_mean_error", f"{lm['mean_error']:.6f}"))
             rows.append((f"{prefix}/landmark_max_error", f"{lm['max_error']:.6f}"))
+            if not math.isnan(lm.get("mean_yaw_error", float("nan"))):
+                rows.append((f"{prefix}/landmark_mean_yaw_error_deg",
+                             f"{lm['mean_yaw_error']:.6f}"))
+                rows.append((f"{prefix}/landmark_max_yaw_error_deg",
+                             f"{lm['max_yaw_error']:.6f}"))
+            per_yaw = lm.get("per_marker_yaw", {})
             for mid, err in sorted(lm["per_marker"].items()):
                 rows.append((f"{prefix}/landmark_{mid}_error", f"{err:.6f}"))
+                if mid in per_yaw:
+                    rows.append((f"{prefix}/landmark_{mid}_yaw_error_deg",
+                                 f"{per_yaw[mid]:.6f}"))
 
     _add("full", metrics_full)
     _add("loop1", metrics_loop1)
@@ -471,7 +505,11 @@ def draw_boxes_and_markers(ax, slam_lm_aligned=None):
             ax.plot(sx, sy, "D", color="magenta", markersize=6,
                     markeredgecolor="black", markeredgewidth=0.5, zorder=8)
             err = math.hypot(sx - gt_mx, sy - gt_my)
-            ax.annotate(f"{err:.2f}m", (sx, sy),
+            gt_normal = math.atan2(BOX_CENTER_GZ[1] - by,
+                                   BOX_CENTER_GZ[0] - bx)
+            yaw_err = abs(normalize_angle(syaw - gt_normal))
+            ax.annotate(f"{err:.2f}m / {math.degrees(yaw_err):.0f}\u00b0",
+                        (sx, sy),
                         textcoords="offset points", xytext=(6, -7),
                         fontsize=6, color="magenta", zorder=8)
             # SLAM landmark normal direction
@@ -540,6 +578,9 @@ def add_metrics_text(ax, ape, drift, lm, title=""):
     if lm and not math.isnan(lm.get("mean_error", float("nan"))):
         lines.append(f"Landmark: mean={lm['mean_error']:.3f}m  "
                      f"max={lm['max_error']:.3f}m")
+        if not math.isnan(lm.get("mean_yaw_error", float("nan"))):
+            lines.append(f"LM Yaw:   mean={lm['mean_yaw_error']:.1f}\u00b0  "
+                         f"max={lm['max_yaw_error']:.1f}\u00b0")
     text = "\n".join(lines)
     ax.text(0.02, 0.02, text, transform=ax.transAxes, fontsize=7.5,
             verticalalignment="bottom", fontfamily="monospace",
