@@ -150,7 +150,10 @@ def extract_aruco_detection_times(bag_path: str,
 
 def extract_slam_landmarks(bag_path: str,
                            topic: str = "/aruco_slam/landmarks"):
-    """Extract SLAM landmark positions from last message. Returns {id: (x,y)}."""
+    """Extract SLAM landmark positions and orientations from last message.
+
+    Returns {id: (x, y, yaw)}.
+    """
     reader, typestore = _get_reader_and_typestore(bag_path)
     last_msg = None
 
@@ -168,7 +171,9 @@ def extract_slam_landmarks(bag_path: str,
     landmarks = {}
     for m in last_msg.markers:
         if m.ns == "landmarks":
-            landmarks[m.id] = (m.pose.position.x, m.pose.position.y)
+            q = m.pose.orientation
+            yaw = quat_to_yaw(q.x, q.y, q.z, q.w)
+            landmarks[m.id] = (m.pose.position.x, m.pose.position.y, yaw)
 
     print(f"  Extracted {len(landmarks)} SLAM landmarks from '{topic}'")
     return landmarks
@@ -459,7 +464,7 @@ def draw_boxes_and_markers(ax, slam_lm_aligned=None):
                                    color="blue", lw=1.2), zorder=5)
 
         if slam_lm_aligned and mid in slam_lm_aligned:
-            sx, sy = slam_lm_aligned[mid]
+            sx, sy, syaw = slam_lm_aligned[mid]
             gt_mx, gt_my = compute_gt_marker_face(bx, by)
             ax.plot([gt_mx, sx], [gt_my, sy], "--", color="gray",
                     linewidth=0.8, alpha=0.6, zorder=3)
@@ -469,6 +474,11 @@ def draw_boxes_and_markers(ax, slam_lm_aligned=None):
             ax.annotate(f"{err:.2f}m", (sx, sy),
                         textcoords="offset points", xytext=(6, -7),
                         fontsize=6, color="magenta", zorder=8)
+            # SLAM landmark normal direction
+            ax.annotate("", xy=(sx + 0.3*math.cos(syaw), sy + 0.3*math.sin(syaw)),
+                        xytext=(sx, sy),
+                        arrowprops=dict(arrowstyle="->,head_width=0.06,head_length=0.05",
+                                        color="magenta", lw=1.2), zorder=9)
 
 
 def set_common_limits(ax, gt_x, gt_y, slam_x=None, slam_y=None):
@@ -588,9 +598,9 @@ def main():
 
                 # SLAM landmarks
                 slam_lm_raw = extract_slam_landmarks(args.bag)
-                for mid, (lx, ly) in slam_lm_raw.items():
+                for mid, (lx, ly, lyaw) in slam_lm_raw.items():
                     pt = apply_transform_2d(R, t, np.array([[lx, ly]]))[0]
-                    slam_lm_aligned[mid] = (pt[0], pt[1])
+                    slam_lm_aligned[mid] = (pt[0], pt[1], lyaw + align_angle)
 
     # ── Compute metrics (full + per-loop) ──
     gt_split = slam_split = None
@@ -640,90 +650,69 @@ def main():
         if mask2.sum() > 10:
             metrics_loop2 = _metrics_for_slice("Loop 2", idx_s[mask2], idx_g[mask2])
 
-    # ── Plot: 2 subplots (Loop 1 / Loop 2) ──
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(22, 11))
+    # ── Plot: single figure ──
+    fig, ax = plt.subplots(1, 1, figsize=(12, 11))
+    ax.set_aspect("equal")
+    ax.set_title("GT vs SLAM Trajectory", fontsize=13)
+    ax.set_xlabel("X (m)")
+    ax.set_ylabel("Y (m)")
+    ax.grid(True, alpha=0.3)
 
-    for ax, loop_idx, title_suffix, m in [
-        (ax1, 0, "Loop 1", metrics_loop1),
-        (ax2, 1, "Loop 2", metrics_loop2),
-    ]:
-        ax.set_aspect("equal")
-        ax.set_title(title_suffix, fontsize=13)
-        ax.set_xlabel("X (m)")
-        ax.set_ylabel("Y (m)")
-        ax.grid(True, alpha=0.3)
+    if gt_x is not None:
+        ax.plot(gt_x, gt_y, "-", color="green", linewidth=1.5, alpha=0.8,
+                zorder=2, label="GT (/odom_gt)")
+        ax.plot(gt_x[0], gt_y[0], "o", color="green", markersize=8, zorder=7)
+        ax.plot(gt_x[-1], gt_y[-1], "^", color="green", markersize=8, zorder=7)
 
-        if gt_split is not None:
-            gt_sl = slice(0, gt_split + 1) if loop_idx == 0 else slice(gt_split, None)
-        else:
-            gt_sl = slice(None)
+        if gt_blind_mask is not None:
+            draw_blind_zones(ax, gt_x, gt_y, gt_blind_mask)
 
-        if slam_split is not None:
-            slam_sl = slice(0, slam_split + 1) if loop_idx == 0 else slice(slam_split, None)
-        else:
-            slam_sl = slice(None)
+    if slam_aligned_x is not None:
+        ax.plot(slam_aligned_x, slam_aligned_y, "-", color="purple",
+                linewidth=1.2, alpha=0.8, zorder=2,
+                label=f"SLAM ({args.slam_topic})")
+        ax.plot(slam_aligned_x[0], slam_aligned_y[0], "o", color="purple",
+                markersize=6, zorder=7)
+        ax.plot(slam_aligned_x[-1], slam_aligned_y[-1], "^", color="purple",
+                markersize=6, zorder=7)
 
-        if gt_x is not None:
-            gx, gy = gt_x[gt_sl], gt_y[gt_sl]
-            ax.plot(gx, gy, "-", color="green", linewidth=1.5, alpha=0.8, zorder=2)
-            ax.plot(gx[0], gy[0], "go", markersize=8, zorder=7)
-            ax.plot(gx[-1], gy[-1], "g^", markersize=8, zorder=7)
-
-            # Overlay blind zones (no ArUco detection)
-            if gt_blind_mask is not None:
-                draw_blind_zones(ax, gx, gy, gt_blind_mask[gt_sl])
-
-        if slam_aligned_x is not None:
-            sx, sy = slam_aligned_x[slam_sl], slam_aligned_y[slam_sl]
-            ax.plot(sx, sy, "-", color="purple", linewidth=1.2, alpha=0.8, zorder=2)
-            ax.plot(sx[0], sy[0], "mo", markersize=6, zorder=7)
-            ax.plot(sx[-1], sy[-1], "m^", markersize=6, zorder=7)
-
-        draw_boxes_and_markers(ax, slam_lm_aligned)
-        set_common_limits(ax, gt_x, gt_y,
-                          slam_aligned_x, slam_aligned_y)
-
-        if m:
-            add_metrics_text(ax, m["ape"], m["drift"], m["lm"])
+    draw_boxes_and_markers(ax, slam_lm_aligned)
+    set_common_limits(ax, gt_x, gt_y, slam_aligned_x, slam_aligned_y)
 
     # Legend
-    legend_elements = [
+    handles, labels = ax.get_legend_handles_labels()
+    handles.extend([
         mpatches.Patch(facecolor="moccasin", edgecolor="darkorange",
-                       label="GT Box (0.5\u00d70.5 m)"),
+                       label="GT Box"),
         plt.Line2D([0], [0], color="red", linewidth=3,
-                   label="ArUco Marker Face"),
+                   label="GT Marker Face"),
         plt.Line2D([0], [0], color="blue", linewidth=1.2, marker=">",
-                   markersize=5, label="Marker Normal"),
-        plt.Line2D([0], [0], color="green", linewidth=1.5,
-                   label="GT Trajectory (/odom_gt)"),
-    ]
-    if slam_aligned_x is not None:
-        legend_elements.append(
-            plt.Line2D([0], [0], color="purple", linewidth=1.2,
-                       label=f"SLAM Trajectory ({args.slam_topic})"))
+                   markersize=5, label="GT Normal"),
+    ])
     if slam_lm_aligned:
-        legend_elements.extend([
+        handles.extend([
             plt.Line2D([0], [0], color="magenta", marker="D",
                        linestyle="None", markersize=6,
                        markeredgecolor="black", markeredgewidth=0.5,
-                       label="SLAM Landmark (aligned)"),
+                       label="SLAM Landmark"),
+            plt.Line2D([0], [0], color="magenta", linewidth=1.2, marker=">",
+                       markersize=5, label="SLAM Normal"),
             plt.Line2D([0], [0], color="gray", linestyle="--",
                        linewidth=0.8, label="Landmark Error"),
         ])
     if gt_blind_mask is not None and np.any(gt_blind_mask):
-        legend_elements.append(
+        handles.append(
             plt.Line2D([0], [0], color="red", linewidth=3.5, alpha=0.5,
-                       label="No ArUco Detection"))
-    legend_elements.extend([
-        plt.Line2D([0], [0], color="green", marker="o", linestyle="None",
+                       label="Blind Zone"))
+    handles.extend([
+        plt.Line2D([0], [0], color="gray", marker="o", linestyle="None",
                    markersize=6, label="Start"),
-        plt.Line2D([0], [0], color="green", marker="^", linestyle="None",
+        plt.Line2D([0], [0], color="gray", marker="^", linestyle="None",
                    markersize=6, label="End"),
     ])
-    fig.legend(handles=legend_elements, loc="lower center",
-               ncol=5, fontsize=9, framealpha=0.9)
+    ax.legend(handles=handles, loc="upper right", fontsize=8, framealpha=0.9)
 
-    plt.tight_layout(rect=[0, 0.06, 1, 1])
+    plt.tight_layout()
 
     # Determine output directory
     if args.output_dir:
