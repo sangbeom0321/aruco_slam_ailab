@@ -877,7 +877,8 @@ public:
         // 6. Landmark factors
         addLandmarkFactors(frameIdx_, markers);
 
-        // 마커 관측 공백 추적
+        // 마커 관측 공백 추적 (gap 계산 후 갱신해야 정확한 값)
+        int gapFrames = frameIdx_ - lastMarkerFrame_;
         if (!markers.markers.empty()) {
             lastMarkerFrame_ = frameIdx_;
         }
@@ -940,7 +941,6 @@ public:
             double corrYaw = std::abs(currentEstimate_.rotation().yaw() - predictedPose.rotation().yaw());
             if (corrYaw > M_PI) corrYaw = 2.0 * M_PI - corrYaw;
 
-            int gapFrames = frameIdx_ - lastMarkerFrame_;
             if (corrTrans > 0.3 || corrYaw > 0.2) {
                 RCLCPP_WARN(get_logger(),
                     "[ISAM2] LARGE correction frame=%d: trans=%.3fm yaw=%.1fdeg markers=%zu gap=%d",
