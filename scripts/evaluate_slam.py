@@ -610,6 +610,20 @@ def compute_landmark_accuracy(landmarks_map_path: str,
 # [5] 시각화
 # ═══════════════════════════════════════════════
 
+def _to_slam_view(xy):
+    """odom_gt XY 배열 → SLAM/Gazebo 탑뷰 좌표 (플롯용).
+
+    _gz_to_odom_gt 의 역변환: (slam_x, slam_y) = (odom_y, -odom_x)
+    SLAM 프레임 ≈ Gazebo 프레임 (odom_gt가 90° 회전된 중간 프레임)
+    """
+    return np.column_stack([xy[:, 1], -xy[:, 0]])
+
+
+def _to_slam_view_pt(x, y):
+    """odom_gt 단일 좌표 → SLAM/Gazebo 뷰."""
+    return y, -x
+
+
 def extract_yaws(traj: PoseTrajectory3D) -> np.ndarray:
     """궤적에서 yaw 배열 추출 (rad)."""
     yaws = np.zeros(traj.num_poses)
@@ -620,11 +634,11 @@ def extract_yaws(traj: PoseTrajectory3D) -> np.ndarray:
 
 def plot_trajectories_2d(traj_gt, traj_est_dict, output_dir, landmarks=None,
                          aruco_visibility=None):
-    """2D XY 궤적 비교 그래프. aruco_visibility가 있으면 미감지 구간 표시."""
+    """2D XY 궤적 비교 그래프 (SLAM/Gazebo 뷰). aruco_visibility가 있으면 미감지 구간 표시."""
     fig, ax = plt.subplots(figsize=(10, 8))
 
-    # GT 궤적
-    gt_xy = traj_gt.positions_xyz[:, :2]
+    # odom_gt → SLAM/Gazebo 뷰 변환
+    gt_xy = _to_slam_view(traj_gt.positions_xyz[:, :2])
     ax.plot(gt_xy[:, 0], gt_xy[:, 1], "k-", linewidth=2.0, label="GT", zorder=3)
     ax.plot(gt_xy[0, 0], gt_xy[0, 1], "go", markersize=10, label="Start", zorder=5)
     ax.plot(gt_xy[-1, 0], gt_xy[-1, 1], "rx", markersize=10, mew=2, label="End", zorder=5)
@@ -636,11 +650,10 @@ def plot_trajectories_2d(traj_gt, traj_est_dict, output_dir, landmarks=None,
         gt_ts = traj_gt.timestamps
 
         if len(no_det_ts) > 0:
-            # GT 궤적에서 미감지 시점에 가장 가까운 포즈 찾기
             no_det_indices = []
             for t in no_det_ts:
                 idx = np.argmin(np.abs(gt_ts - t))
-                if np.abs(gt_ts[idx] - t) < 0.1:  # 100ms tolerance
+                if np.abs(gt_ts[idx] - t) < 0.1:
                     no_det_indices.append(idx)
 
             if no_det_indices:
@@ -650,15 +663,13 @@ def plot_trajectories_2d(traj_gt, traj_est_dict, output_dir, landmarks=None,
                            label=f"No ArUco ({len(no_det_indices)})", zorder=6,
                            alpha=0.8)
 
-        # ArUco 감지 밀도가 낮은 구간도 표시 (선택: 1초 이상 간격)
         detection_ts = all_ts[aruco_visibility["marker_counts"] > 0]
         if len(detection_ts) > 1:
             gaps = np.diff(detection_ts)
-            long_gaps = np.where(gaps > 1.0)[0]  # 1초 이상 간격
+            long_gaps = np.where(gaps > 1.0)[0]
             for gi in long_gaps:
                 gap_start_t = detection_ts[gi]
                 gap_end_t = detection_ts[gi + 1]
-                # 이 구간의 GT 포즈 인덱스
                 gap_mask = (gt_ts >= gap_start_t) & (gt_ts <= gap_end_t)
                 if np.any(gap_mask):
                     gap_xy = gt_xy[gap_mask]
@@ -668,52 +679,54 @@ def plot_trajectories_2d(traj_gt, traj_est_dict, output_dir, landmarks=None,
     # 추정 궤적
     colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728"]
     for idx, (name, traj) in enumerate(traj_est_dict.items()):
-        xy = traj.positions_xyz[:, :2]
+        xy = _to_slam_view(traj.positions_xyz[:, :2])
         color = colors[idx % len(colors)]
         ax.plot(xy[:, 0], xy[:, 1], "-", color=color, linewidth=1.5,
                 label=name, alpha=0.8, zorder=2)
 
     # 랜드마크 (사각형 + 헤딩 화살표)
     if landmarks:
-        from matplotlib.patches import FancyArrowPatch
         gt_lm = landmarks.get("gt_landmarks", {})
         est_lm = landmarks.get("est_landmarks", {})
         marker_info = compute_marker_gt_positions()
 
         for mid, pos in gt_lm.items():
-            # GT 마커: 사각형 (박스 투영) + 법선 방향 화살표
+            sp = _to_slam_view_pt(pos[0], pos[1])
             if mid in marker_info:
                 info = marker_info[mid]
                 box_x, box_y = info["box"]
+                bsx, bsy = _to_slam_view_pt(box_x, box_y)
                 yaw = info["yaw"]
                 normal_yaw = info["normal_yaw"]
+                # yaw/normal_yaw도 SLAM 뷰로 회전 (+90°)
+                yaw_s = yaw + math.pi / 2
+                normal_yaw_s = normal_yaw + math.pi / 2
                 half = BOX_SIZE / 2.0
-                # 박스 꼭짓점 (로컬 → 월드 회전)
                 corners_local = np.array([
                     [-half, -half], [half, -half],
                     [half, half], [-half, half], [-half, -half]])
-                cos_y, sin_y = np.cos(yaw), np.sin(yaw)
+                cos_y, sin_y = np.cos(yaw_s), np.sin(yaw_s)
                 corners_world = np.column_stack([
-                    box_x + corners_local[:, 0]*cos_y - corners_local[:, 1]*sin_y,
-                    box_y + corners_local[:, 0]*sin_y + corners_local[:, 1]*cos_y])
+                    bsx + corners_local[:, 0]*cos_y - corners_local[:, 1]*sin_y,
+                    bsy + corners_local[:, 0]*sin_y + corners_local[:, 1]*cos_y])
                 ax.plot(corners_world[:, 0], corners_world[:, 1],
                         "k-", linewidth=1.0, zorder=4)
-                # 마커 면 위치에 법선 화살표 (마커가 바라보는 방향)
                 arrow_len = 0.3
-                ax.annotate("", xy=(pos[0] + arrow_len*np.cos(normal_yaw),
-                                    pos[1] + arrow_len*np.sin(normal_yaw)),
-                            xytext=(pos[0], pos[1]),
+                ax.annotate("", xy=(sp[0] + arrow_len*np.cos(normal_yaw_s),
+                                    sp[1] + arrow_len*np.sin(normal_yaw_s)),
+                            xytext=(sp[0], sp[1]),
                             arrowprops=dict(arrowstyle="->", color="black",
                                             lw=1.5), zorder=5)
-            ax.annotate(f"M{mid}", (pos[0], pos[1]), fontsize=7,
+            ax.annotate(f"M{mid}", sp, fontsize=7,
                         xytext=(3, 3), textcoords="offset points", zorder=6)
 
         for mid, pos in est_lm.items():
-            ax.plot(pos[0], pos[1], "m^", markersize=6, alpha=0.7, zorder=4)
+            sp = _to_slam_view_pt(pos[0], pos[1])
+            ax.plot(sp[0], sp[1], "m^", markersize=6, alpha=0.7, zorder=4)
 
     ax.set_xlabel("X (m)")
     ax.set_ylabel("Y (m)")
-    ax.set_title("2D Trajectory Comparison")
+    ax.set_title("2D Trajectory Comparison (SLAM View)")
     ax.legend(loc="best")
     ax.set_aspect("equal")
     ax.grid(True, alpha=0.3)
@@ -830,48 +843,51 @@ def plot_rpe_by_delta(rpe_results, output_dir):
 
 
 def plot_landmark_comparison(lm_result, output_dir):
-    """GT vs 추정 랜드마크 위치 비교."""
+    """GT vs 추정 랜드마크 위치 비교 (SLAM/Gazebo 뷰)."""
     gt_lm = lm_result["gt_landmarks"]
     est_lm = lm_result["est_landmarks"]
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
 
-    # 2D 위치 비교 (사각형 + 헤딩)
+    # 2D 위치 비교 (사각형 + 헤딩) — SLAM 뷰 좌표
     marker_info = compute_marker_gt_positions()
     for mid in sorted(gt_lm.keys()):
         gt_pos = gt_lm[mid]
+        gt_sx, gt_sy = _to_slam_view_pt(gt_pos[0], gt_pos[1])
         # GT 마커 박스 사각형
         if mid in marker_info:
             info = marker_info[mid]
             box_x, box_y = info["box"]
-            yaw = info["yaw"]
-            normal_yaw = info["normal_yaw"]
+            yaw = info["yaw"] + np.pi / 2  # odom_gt→SLAM 뷰 회전 보정
+            normal_yaw = info["normal_yaw"] + np.pi / 2
+            sb_x, sb_y = _to_slam_view_pt(box_x, box_y)
             half = BOX_SIZE / 2.0
             corners_local = np.array([
                 [-half, -half], [half, -half],
                 [half, half], [-half, half], [-half, -half]])
             cos_y, sin_y = np.cos(yaw), np.sin(yaw)
             corners_world = np.column_stack([
-                box_x + corners_local[:, 0]*cos_y - corners_local[:, 1]*sin_y,
-                box_y + corners_local[:, 0]*sin_y + corners_local[:, 1]*cos_y])
+                sb_x + corners_local[:, 0]*cos_y - corners_local[:, 1]*sin_y,
+                sb_y + corners_local[:, 0]*sin_y + corners_local[:, 1]*cos_y])
             ax1.plot(corners_world[:, 0], corners_world[:, 1],
                      "k-", linewidth=1.0, zorder=3)
-            ax1.annotate("", xy=(gt_pos[0] + 0.3*np.cos(normal_yaw),
-                                 gt_pos[1] + 0.3*np.sin(normal_yaw)),
-                         xytext=(gt_pos[0], gt_pos[1]),
+            ax1.annotate("", xy=(gt_sx + 0.3*np.cos(normal_yaw),
+                                 gt_sy + 0.3*np.sin(normal_yaw)),
+                         xytext=(gt_sx, gt_sy),
                          arrowprops=dict(arrowstyle="->", color="black", lw=1.5),
                          zorder=4)
-        ax1.annotate(f"GT {mid}", (gt_pos[0], gt_pos[1]),
+        ax1.annotate(f"GT {mid}", (gt_sx, gt_sy),
                      fontsize=7, xytext=(-10, 8), textcoords="offset points")
         if mid in est_lm:
             est_pos = est_lm[mid][:2]
-            ax1.plot(est_pos[0], est_pos[1], "r^", markersize=8, alpha=0.7)
-            ax1.plot([gt_pos[0], est_pos[0]], [gt_pos[1], est_pos[1]],
+            es_x, es_y = _to_slam_view_pt(est_pos[0], est_pos[1])
+            ax1.plot(es_x, es_y, "r^", markersize=8, alpha=0.7)
+            ax1.plot([gt_sx, es_x], [gt_sy, es_y],
                      "r--", alpha=0.4, linewidth=0.8)
 
     ax1.set_xlabel("X (m)")
     ax1.set_ylabel("Y (m)")
-    ax1.set_title("Landmark Positions: GT (black) vs SLAM (red)")
+    ax1.set_title("Landmark Positions: GT (black) vs SLAM (red) [SLAM View]")
     ax1.set_aspect("equal")
     ax1.grid(True, alpha=0.3)
 
