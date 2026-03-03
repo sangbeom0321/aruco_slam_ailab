@@ -592,12 +592,29 @@ def main():
             print(f"  [{label}] Synced {len(idx_est)} pose pairs")
             if len(idx_est) < 3:
                 return None, None, None, None, None, 0.0
+
+            # 시작 시간/위치 진단
+            dt_start = est_ts[0] - gt_ts[0]
+            print(f"  [{label}] Start time gap: {dt_start:.2f}s "
+                  f"(GT t0={gt_ts[0]:.2f}, {label} t0={est_ts[0]:.2f})")
+            print(f"  [{label}] Raw start: ({est_x[0]:.3f}, {est_y[0]:.3f})  "
+                  f"GT start: ({gt_x[0]:.3f}, {gt_y[0]:.3f})")
+
             src = np.column_stack([est_x[idx_est], est_y[idx_est]])
             dst = np.column_stack([gt_x[idx_gt], gt_y[idx_gt]])
             R, t = umeyama_2d(src, dst)
             angle = math.atan2(R[1, 0], R[0, 0])
             aligned = apply_transform_2d(R, t,
                                          np.column_stack([est_x, est_y]))
+
+            # 정렬 후 시작점 비교
+            # GT에서 est 시작 시각과 가장 가까운 점 찾기
+            gt_idx_at_est_start = np.argmin(np.abs(gt_ts - est_ts[0]))
+            print(f"  [{label}] Aligned start: ({aligned[0, 0]:.3f}, {aligned[0, 1]:.3f})  "
+                  f"GT@same_time: ({gt_x[gt_idx_at_est_start]:.3f}, "
+                  f"{gt_y[gt_idx_at_est_start]:.3f})  "
+                  f"offset: {math.hypot(aligned[0, 0] - gt_x[gt_idx_at_est_start], aligned[0, 1] - gt_y[gt_idx_at_est_start]):.3f}m")
+
             return aligned[:, 0], aligned[:, 1], est_yaw + angle, R, t, angle
 
         # ── Align SLAM → Gazebo ──
@@ -673,8 +690,8 @@ def main():
                 slam_aligned_x, slam_aligned_y, slam_aligned_yaw)
 
     # ── Helper: draw a single trajectory plot ──
-    def _make_trajectory_plot(est_aligned_x, est_aligned_y, est_label,
-                              est_color, show_landmarks):
+    def _make_trajectory_plot(est_aligned_x, est_aligned_y, est_ts_arr,
+                              est_label, est_color, show_landmarks):
         fig, ax = plt.subplots(1, 1, figsize=(12, 11))
         ax.set_aspect("equal")
         ax.set_title(f"GT vs {est_label}", fontsize=13)
@@ -682,22 +699,36 @@ def main():
         ax.set_ylabel("Y (m)")
         ax.grid(True, alpha=0.3)
 
+        # 공통 시간 구간으로 트림
+        gt_s = slice(None)
+        est_s = slice(None)
+        if (gt_ts is not None and est_ts_arr is not None
+                and len(gt_ts) > 0 and len(est_ts_arr) > 0):
+            t_start = max(gt_ts[0], est_ts_arr[0])
+            t_end = min(gt_ts[-1], est_ts_arr[-1])
+            gt_s = slice(np.searchsorted(gt_ts, t_start),
+                         np.searchsorted(gt_ts, t_end, side='right'))
+            est_s = slice(np.searchsorted(est_ts_arr, t_start),
+                          np.searchsorted(est_ts_arr, t_end, side='right'))
+
         if gt_x is not None:
-            ax.plot(gt_x, gt_y, "-", color="green", linewidth=1.5, alpha=0.8,
+            gx, gy = gt_x[gt_s], gt_y[gt_s]
+            ax.plot(gx, gy, "-", color="green", linewidth=1.5, alpha=0.8,
                     zorder=2, label="GT (/odom_gt)")
-            ax.plot(gt_x[0], gt_y[0], "o", color="green", markersize=8,
+            ax.plot(gx[0], gy[0], "o", color="green", markersize=8,
                     zorder=7)
-            ax.plot(gt_x[-1], gt_y[-1], "^", color="green", markersize=8,
+            ax.plot(gx[-1], gy[-1], "^", color="green", markersize=8,
                     zorder=7)
             if gt_blind_mask is not None:
-                draw_blind_zones(ax, gt_x, gt_y, gt_blind_mask)
+                draw_blind_zones(ax, gx, gy, gt_blind_mask[gt_s])
 
         if est_aligned_x is not None:
-            ax.plot(est_aligned_x, est_aligned_y, "-", color=est_color,
+            ex, ey = est_aligned_x[est_s], est_aligned_y[est_s]
+            ax.plot(ex, ey, "-", color=est_color,
                     linewidth=1.2, alpha=0.8, zorder=2, label=est_label)
-            ax.plot(est_aligned_x[0], est_aligned_y[0], "o",
+            ax.plot(ex[0], ey[0], "o",
                     color=est_color, markersize=6, zorder=7)
-            ax.plot(est_aligned_x[-1], est_aligned_y[-1], "^",
+            ax.plot(ex[-1], ey[-1], "^",
                     color=est_color, markersize=6, zorder=7)
 
         lm = slam_lm_aligned if show_landmarks else None
@@ -749,7 +780,7 @@ def main():
 
     # SLAM plot
     fig_slam = _make_trajectory_plot(
-        slam_aligned_x, slam_aligned_y,
+        slam_aligned_x, slam_aligned_y, slam_ts,
         f"SLAM ({args.slam_topic})", "purple", show_landmarks=True)
     slam_path = os.path.join(out_dir, "trajectory_slam.png")
     fig_slam.savefig(slam_path, dpi=150)
@@ -758,7 +789,7 @@ def main():
 
     # EKF plot
     fig_ekf = _make_trajectory_plot(
-        ekf_aligned_x, ekf_aligned_y,
+        ekf_aligned_x, ekf_aligned_y, ekf_ts,
         f"EKF ({args.ekf_topic})", "darkorange", show_landmarks=False)
     ekf_path = os.path.join(out_dir, "trajectory_ekf.png")
     fig_ekf.savefig(ekf_path, dpi=150)
