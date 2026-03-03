@@ -392,47 +392,43 @@ def normalize_angle(angle: float) -> float:
     return angle
 
 
-def compute_landmark_accuracy(landmarks_map_path: str) -> dict:
+def compute_landmark_accuracy(landmarks_map_path: str,
+                              T_align: np.ndarray = None) -> dict:
     """
-    SLAM 추정 랜드마크와 Gazebo GT 마커 위치를 비교합니다.
+    SLAM landmarks vs Gazebo GT markers.
 
-    Gazebo 마커 위치를 ROS 좌표계로 변환 후, 로봇 초기 포즈 기준 원점 리셋을 적용합니다.
-    로봇 Gazebo spawn: (0, 0, yaw=-90°)
-    → ROS 변환 후: (0, 0, yaw=-180°)
-    → 원점 리셋: 첫 포즈 R^T * (p - p0) → R(180°)^T * (p_ros)
+    GT landmarks are in raw Gazebo world frame (same as /odom_gt).
+    SLAM landmarks are in SLAM map frame.
+    T_align (from Umeyama) maps SLAM frame → GT frame.
     """
-    # SLAM 추정 랜드마크 로드
     with open(landmarks_map_path, "r") as f:
         data = json.load(f)
 
-    est_landmarks = {}
+    # SLAM landmarks (SLAM map frame)
+    est_landmarks_raw = {}
     for lm in data["landmarks"]:
-        est_landmarks[lm["id"]] = np.array([
+        est_landmarks_raw[lm["id"]] = np.array([
             lm["position"]["x"],
             lm["position"]["y"],
             lm["position"]["z"],
         ])
 
-    # Gazebo → ROS 좌표 변환 + 원점 리셋
-    # 로봇 spawn: Gazebo (0, 0, yaw=-90°)
-    # ROS 변환: (Y_gz, -X_gz) = (0, 0), yaw_ros = -90° + (-90°) = -180°
-    # 원점 리셋: R(-180°)^T * (p_ros - 0) = R(180°) * p_ros
-    # R(180°) = [[-1, 0], [0, -1]]
-    robot_yaw_ros = math.radians(-180.0)
-    cos_y = math.cos(robot_yaw_ros)  # -1
-    sin_y = math.sin(robot_yaw_ros)  # ~0
-
+    # GT landmarks: raw Gazebo XY (same frame as GT trajectory)
     gt_landmarks = {}
     for mid, (gx, gy) in GAZEBO_MARKER_POSITIONS.items():
-        # Gazebo → ROS: X_ros = Y_gz, Y_ros = -X_gz
-        rx, ry = gy, -gx
-        # 원점 리셋: R(-yaw)^T * (p - p0)
-        # R(-yaw)^T = R(yaw) → 여기서 yaw = -180°
-        ox = cos_y * rx - sin_y * ry
-        oy = sin_y * rx + cos_y * ry
-        gt_landmarks[mid] = np.array([ox, oy])
+        gt_landmarks[mid] = np.array([gx, gy])
 
-    # 비교
+    # SLAM landmarks → GT frame via T_align
+    est_landmarks = {}
+    for mid, pos3d in est_landmarks_raw.items():
+        if T_align is not None:
+            p_hom = np.array([pos3d[0], pos3d[1], pos3d[2], 1.0])
+            p_aligned = T_align @ p_hom
+            est_landmarks[mid] = p_aligned[:3]
+        else:
+            est_landmarks[mid] = pos3d
+
+    # 2D comparison
     per_marker = {}
     for mid in sorted(set(est_landmarks.keys()) & set(gt_landmarks.keys())):
         est_xy = est_landmarks[mid][:2]
@@ -475,8 +471,8 @@ def plot_trajectories_2d(traj_gt, traj_est_dict, output_dir, landmarks=None):
     # GT 궤적
     gt_xy = traj_gt.positions_xyz[:, :2]
     ax.plot(gt_xy[:, 0], gt_xy[:, 1], "k-", linewidth=2.0, label="GT", zorder=3)
-    ax.plot(gt_xy[0, 0], gt_xy[0, 1], "go", markersize=10, label="시작점", zorder=5)
-    ax.plot(gt_xy[-1, 0], gt_xy[-1, 1], "rx", markersize=10, mew=2, label="끝점", zorder=5)
+    ax.plot(gt_xy[0, 0], gt_xy[0, 1], "go", markersize=10, label="Start", zorder=5)
+    ax.plot(gt_xy[-1, 0], gt_xy[-1, 1], "rx", markersize=10, mew=2, label="End", zorder=5)
 
     # 추정 궤적
     colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728"]
@@ -924,11 +920,12 @@ def main():
         # Drift Rate 계산
         drift = compute_drift_rate(traj_gt_sync, traj_est_aligned)
 
-        # 랜드마크 정확도 (옵션)
+        # Landmark accuracy (optional)
         lm_result = None
         if args.landmarks_map and os.path.exists(args.landmarks_map):
-            print("  랜드마크 정확도 계산 중...")
-            lm_result = compute_landmark_accuracy(args.landmarks_map)
+            print("  Computing landmark accuracy...")
+            lm_result = compute_landmark_accuracy(
+                args.landmarks_map, T_align=align_info.get("T_align"))
 
         # ──── 콘솔 출력 ────
         print_summary(ape, rpe_list, drift, lm_result, align_info, gt_topic, est_topic)
