@@ -1263,40 +1263,52 @@ def main():
                 traj_gt_plot = traj_gt_sync
                 traj_est_plot = traj_est_aligned
 
-            # 랜드마크 SLAM 프레임 데이터 준비
-            lm_for_plot = None
+            # 랜드마크 데이터 준비
+            lm_for_traj = None   # 궤적 플롯용 (T_traj^{-1} 통일)
+            lm_for_lm = None     # 랜드마크 비교 플롯용 (T_lm^{-1})
             if lm_result and not math.isnan(lm_result.get("mean_error", float("nan"))):
                 T_lm = lm_result.get("T_landmark_align")
-                if T_lm is not None:
-                    T_lm_inv = np.linalg.inv(T_lm)
-                else:
-                    T_lm_inv = np.eye(4)
-                # GT 마커 박스 정보를 SLAM 랜드마크 프레임으로 변환
-                marker_info_slam = _compute_marker_info_in_frame(T_lm_inv)
-                lm_for_plot = {
-                    "marker_info": marker_info_slam,
-                    "est_landmarks": lm_result["est_landmarks_raw"],
+                T_lm_inv = np.linalg.inv(T_lm) if T_lm is not None else np.eye(4)
+
+                # 공통 지표 필드
+                lm_metrics = {
                     "per_marker": lm_result["per_marker"],
                     "mean_error": lm_result["mean_error"],
                     "max_error": lm_result["max_error"],
                     "max_error_id": lm_result["max_error_id"],
                 }
                 if "per_marker_yaw" in lm_result:
-                    lm_for_plot["per_marker_yaw"] = lm_result["per_marker_yaw"]
-                    lm_for_plot["mean_yaw_error"] = lm_result["mean_yaw_error"]
-                    lm_for_plot["max_yaw_error"] = lm_result["max_yaw_error"]
+                    lm_metrics["per_marker_yaw"] = lm_result["per_marker_yaw"]
+                    lm_metrics["mean_yaw_error"] = lm_result["mean_yaw_error"]
+                    lm_metrics["max_yaw_error"] = lm_result["max_yaw_error"]
+
+                # 궤적 플롯: T_traj^{-1}로 GT 박스/랜드마크 모두 변환
+                # → GT 궤적과 GT 박스가 같은 프레임 (물리적 정합성 유지)
+                lm_for_traj = {
+                    "marker_info": _compute_marker_info_in_frame(T_traj_inv),
+                    "est_landmarks": lm_result["est_landmarks_raw"],
+                    **lm_metrics,
+                }
+
+                # 랜드마크 비교 플롯: T_lm^{-1}로 GT 박스 변환
+                # → SLAM 랜드마크와 GT 박스 간 정밀 비교
+                lm_for_lm = {
+                    "marker_info": _compute_marker_info_in_frame(T_lm_inv),
+                    "est_landmarks": lm_result["est_landmarks_raw"],
+                    **lm_metrics,
+                }
 
             traj_est_dict = {est_topic: traj_est_plot}
             plot_trajectories_2d(traj_gt_plot, traj_est_dict, est_output_dir,
-                                landmarks=lm_for_plot,
+                                landmarks=lm_for_traj,
                                 aruco_visibility=aruco_vis)
             plot_ape_over_time(ape, est_output_dir)
             plot_ape_distribution(ape, est_output_dir)
             plot_rpe_by_delta(rpe_list, est_output_dir)
             plot_yaw_comparison(traj_gt_plot, traj_est_plot, est_output_dir)
 
-            if lm_for_plot:
-                plot_landmark_comparison(lm_for_plot, est_output_dir)
+            if lm_for_lm:
+                plot_landmark_comparison(lm_for_lm, est_output_dir)
 
             print(f"  그래프 저장: {est_output_dir}/")
         elif not HAS_MATPLOTLIB:
