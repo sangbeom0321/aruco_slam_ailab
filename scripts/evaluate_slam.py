@@ -167,6 +167,21 @@ def quats_to_rotation_matrices(quats: np.ndarray) -> np.ndarray:
     return R
 
 
+def reorthogonalize(R: np.ndarray) -> np.ndarray:
+    """SVD로 3x3 회전 행렬을 SO(3)로 재투영."""
+    U, _, Vt = np.linalg.svd(R)
+    d = np.linalg.det(U @ Vt)
+    return U @ np.diag([1.0, 1.0, d]) @ Vt
+
+
+def reorthogonalize_poses(poses_se3: np.ndarray) -> np.ndarray:
+    """SE(3) 배열의 회전 부분을 SO(3)로 재투영."""
+    out = poses_se3.copy()
+    for i in range(len(out)):
+        out[i, :3, :3] = reorthogonalize(out[i, :3, :3])
+    return out
+
+
 def to_evo_trajectory(odom_list: list) -> PoseTrajectory3D:
     """odom list → evo PoseTrajectory3D 변환."""
     timestamps, positions, quats = odom_list_to_arrays(odom_list)
@@ -174,6 +189,9 @@ def to_evo_trajectory(odom_list: list) -> PoseTrajectory3D:
     rot_mats = quats_to_rotation_matrices(quats)
     n = len(timestamps)
     poses_se3 = np.zeros((n, 4, 4))
+    # 쿼터니언 정규화 오차로 인한 SO(3) 위반 방지
+    for i in range(n):
+        rot_mats[i] = reorthogonalize(rot_mats[i])
     poses_se3[:, :3, :3] = rot_mats
     poses_se3[:, :3, 3] = positions
     poses_se3[:, 3, 3] = 1.0
@@ -228,7 +246,8 @@ def align_trajectories(traj_gt: PoseTrajectory3D,
         T_est0 = traj_est_sync.poses_se3[0]
         T_align = T_gt0 @ np.linalg.inv(T_est0)
 
-        aligned_poses = np.array([T_align @ p for p in traj_est_sync.poses_se3])
+        aligned_poses = reorthogonalize_poses(
+            np.array([T_align @ p for p in traj_est_sync.poses_se3]))
         traj_est_aligned = PoseTrajectory3D(
             poses_se3=aligned_poses, timestamps=traj_est_sync.timestamps)
 
@@ -236,12 +255,24 @@ def align_trajectories(traj_gt: PoseTrajectory3D,
         return traj_gt_sync, traj_est_aligned, info
 
     if method == "umeyama":
-        # SE(3) Umeyama 정렬 (evo 내장)
-        from evo.core import trajectory as evo_traj
-        traj_est_aligned = evo_traj.align_trajectory(
-            traj_est_sync, traj_gt_sync,
-            correct_scale=False, correct_only_scale=False)
+        # SE(3) Umeyama 정렬
+        from evo.core.geometry import umeyama_alignment
 
+        gt_xyz = traj_gt_sync.positions_xyz.T   # 3xN
+        est_xyz = traj_est_sync.positions_xyz.T  # 3xN
+        rot, trans, _ = umeyama_alignment(est_xyz, gt_xyz, with_scale=False)
+
+        # SE(3) 변환 행렬 구성
+        T_align = np.eye(4)
+        T_align[:3, :3] = rot
+        T_align[:3, 3] = trans
+
+        aligned_poses = reorthogonalize_poses(
+            np.array([T_align @ p for p in traj_est_sync.poses_se3]))
+        traj_est_aligned = PoseTrajectory3D(
+            poses_se3=aligned_poses, timestamps=traj_est_sync.timestamps)
+
+        info["T_align"] = T_align
         info["note"] = "SE(3) Umeyama alignment applied"
         return traj_gt_sync, traj_est_aligned, info
 
