@@ -7,7 +7,7 @@ import yaml
 from os.path import join
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, TimerAction, OpaqueFunction
+from launch.actions import DeclareLaunchArgument, SetEnvironmentVariable, TimerAction, OpaqueFunction
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
@@ -203,7 +203,14 @@ def generate_launch_description():
         description='Enable topic receive debug logs (aruco) for diagnostics'
     )
 
+    # Fast-DDS 소켓 버퍼 확장 ("sequence size exceeds remaining buffer" 경고 제거)
+    pkg_share_aruco = get_package_share_directory('aruco_sam_ailab')
+    fastdds_profile = join(pkg_share_aruco, 'config', 'fastdds_profile.xml')
+    set_fastdds_env = SetEnvironmentVariable(
+        'FASTRTPS_DEFAULT_PROFILES_FILE', fastdds_profile)
+
     return LaunchDescription([
+        set_fastdds_env,
         use_sim_time_arg,
         run_mode_arg,
         map_path_arg,
