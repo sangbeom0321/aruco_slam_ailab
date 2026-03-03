@@ -273,19 +273,29 @@ private:
                     }
 
                     double pos_x = tvec[0], pos_y = tvec[1], pos_z = tvec[2];
+                    double pnp_depth = tvec[2];  // PnP Z = 카메라 광축 거리
 
-                    // Depth 보정: 유효하면 역투영으로 (x,y,z) 교체, 아니면 PnP 유지
+                    // Depth 보정: PnP 거리와 depth 센서 값이 일관성 있을 때만 적용
+                    // 중간 장애물에 depth가 맞으면 PnP 거리와 큰 차이 발생 → 거부
                     if (use_depth_correction_ && !depth_for_sample.empty()) {
                         double depth_m = sampleDepthInMarkerRegion(
                             depth_for_sample, cv_image.cols, cv_image.rows, corners[idx]);
                         if (depth_m > 0.01 && depth_m <= depth_max_range_) {
-                            float cx = 0, cy = 0;
-                            for (const auto& p : corners[idx]) { cx += p.x; cy += p.y; }
-                            cx /= 4.0f; cy /= 4.0f;
-                            cv::Point3d pt = backProjectToCamera(cx, cy, depth_m);
-                            pos_x = pt.x;
-                            pos_y = pt.y;
-                            pos_z = pt.z;
+                            double depth_ratio = depth_m / std::max(pnp_depth, 0.01);
+                            // PnP와 depth 차이가 30% 이내일 때만 depth 보정 적용
+                            if (depth_ratio > 0.7 && depth_ratio < 1.3) {
+                                float cx = 0, cy = 0;
+                                for (const auto& p : corners[idx]) { cx += p.x; cy += p.y; }
+                                cx /= 4.0f; cy /= 4.0f;
+                                cv::Point3d pt = backProjectToCamera(cx, cy, depth_m);
+                                pos_x = pt.x;
+                                pos_y = pt.y;
+                                pos_z = pt.z;
+                            } else if (debug_enabled_) {
+                                RCLCPP_WARN(get_logger(),
+                                    "Depth rejected for ID %d: PnP=%.2fm depth=%.2fm ratio=%.2f",
+                                    marker_id, pnp_depth, depth_m, depth_ratio);
+                            }
                         }
                     }
 
