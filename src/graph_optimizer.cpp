@@ -929,7 +929,7 @@ public:
                     frameIdx_, corrTrans, corrYaw * 180.0 / M_PI, markers.markers.size());
             }
 
-            RCLCPP_INFO(get_logger(),
+            RCLCPP_DEBUG(get_logger(),
                 "[ISAM2] frame=%d pos=(%.3f,%.3f) yaw=%.2f markers=%zu corr=%.3fm",
                 frameIdx_,
                 currentEstimate_.translation().x(), currentEstimate_.translation().y(),

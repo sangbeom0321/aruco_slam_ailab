@@ -152,7 +152,7 @@ public:
             return false;
         }
         if (updateCount_ < CONVERGENCE_UPDATES) {
-            RCLCPP_INFO(get_logger(),
+            RCLCPP_DEBUG(get_logger(),
                 "[EKF] Convergence %d/%d: trans=%.3fm rot=%.3frad (accepted)",
                 updateCount_ + 1, CONVERGENCE_UPDATES, transInnovation, rotInnovation);
         }
