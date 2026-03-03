@@ -62,31 +62,54 @@ except ImportError:
 
 # ─────────────────────────────────────────────
 # Gazebo 마커 GT 위치 (gazebo_aruco.launch.py)
-# 원본 Gazebo 좌표를 /odom_gt 프레임으로 변환하여 사용
-# 변환: (odom_gt_x, odom_gt_y) = (-gz_y, gz_x)
-# (wheel_odom_node.py:gazebo_pose_to_ros + 원점 리셋 재현)
-# 로봇 스폰: Gazebo (0, 0), yaw=-90°
+# Gazebo 월드 좌표 그대로 사용 (기준 좌표계 = Gazebo)
+# GT 궤적(/odom_gt)은 _odom_gt_to_gazebo()로 Gazebo 프레임으로 변환
 # ─────────────────────────────────────────────
-def _gz_to_odom_gt(gz_x, gz_y):
-    """Gazebo 월드 좌표 → /odom_gt 프레임 변환."""
-    return (-gz_y, gz_x)
-
-
 GAZEBO_BOX_CENTERS = {
-    11: _gz_to_odom_gt(0.0, 3.0),
-    12: _gz_to_odom_gt(1.9, 3.0),
-    13: _gz_to_odom_gt(1.9, -1.5),
-    14: _gz_to_odom_gt(4.6, -1.5),
-    15: _gz_to_odom_gt(4.6, -3.75),
-    16: _gz_to_odom_gt(4.6, -6.0),
-    17: _gz_to_odom_gt(1.45, -6.0),
-    18: _gz_to_odom_gt(-1.7, -6.0),
-    19: _gz_to_odom_gt(-1.9, 3.0),
-    20: _gz_to_odom_gt(-1.7, -1.5),
+    11: (0.0, 3.0),
+    12: (1.9, 3.0),
+    13: (1.9, -1.5),
+    14: (4.6, -1.5),
+    15: (4.6, -3.75),
+    16: (4.6, -6.0),
+    17: (1.45, -6.0),
+    18: (-1.7, -6.0),
+    19: (-1.9, 3.0),
+    20: (-1.7, -1.5),
 }
 MARKER_FACE_OFFSET = 0.251  # 박스 중심 → -X face (마커 부착면) 거리 (m)
 BOX_SIZE = 0.50  # 박스 한 변 길이 (m)
-BOX_CENTER = _gz_to_odom_gt(1.495, -2.425)  # 모든 박스가 바라보는 중심점
+BOX_CENTER = (1.495, -2.425)  # 모든 박스가 바라보는 중심점
+
+
+def _odom_gt_to_gazebo(odom_list):
+    """odom_gt 프레임 데이터를 Gazebo 월드 프레임으로 변환.
+
+    wheel_odom_node.py의 변환(Gazebo→odom_gt: +90° Z회전)의 역변환.
+    위치: (gz_x, gz_y, gz_z) = (odom_y, -odom_x, odom_z)
+    쿼터니언: q_gz = Q_Z_MINUS_90 * q_odom
+
+    Args:
+        odom_list: list of (t, x, y, z, qx, qy, qz, qw) in odom_gt frame
+
+    Returns:
+        list of (t, x, y, z, qx, qy, qz, qw) in Gazebo world frame
+    """
+    # Q_Z_MINUS_90 = (qx=0, qy=0, qz=-sin(π/4), qw=cos(π/4))
+    c = 0.7071067811865475   # cos(π/4)
+    s = -0.7071067811865475  # sin(-π/4) = -sin(π/4)
+
+    result = []
+    for t, x, y, z, qx, qy, qz, qw in odom_list:
+        # 위치 변환
+        gz_x, gz_y, gz_z = y, -x, z
+        # 쿼터니언: Q_Z_MINUS_90 * q_odom (Hamilton 곱)
+        nqw = c * qw - s * qz          # c*qw + c*qz → 0.7071*(qw + qz)
+        nqx = c * qx - s * qy          # c*qx + c*qy → 0.7071*(qx + qy)
+        nqy = c * qy + s * qx          # c*qy - c*qx → 0.7071*(qy - qx)
+        nqz = c * qz + s * qw          # c*qz - c*qw → 0.7071*(qz - qw)
+        result.append((t, gz_x, gz_y, gz_z, nqx, nqy, nqz, nqw))
+    return result
 
 
 def compute_marker_gt_positions():
@@ -497,11 +520,11 @@ def compute_landmark_accuracy(landmarks_map_path: str,
     """
     SLAM landmarks vs Gazebo GT markers.
 
-    GT landmarks are in /odom_gt frame (Gazebo→ROS 변환 + 원점 리셋 적용).
-    SLAM landmarks are in SLAM map frame.
+    GT landmarks: Gazebo 월드 좌표 (GAZEBO_MARKER_POSITIONS)
+    SLAM landmarks: SLAM map 프레임 (landmarks_map.json)
 
     랜드마크 전용 Umeyama SE(3) 정렬을 사용하여 SLAM 랜드마크 프레임 →
-    GT(/odom_gt) 프레임 변환을 계산합니다.
+    Gazebo 프레임 변환을 계산합니다.
     (궤적 T_align과 랜드마크 프레임이 다를 수 있으므로 별도 정렬)
     """
     from evo.core.geometry import umeyama_alignment
@@ -610,20 +633,6 @@ def compute_landmark_accuracy(landmarks_map_path: str,
 # [5] 시각화
 # ═══════════════════════════════════════════════
 
-def _to_slam_view(xy):
-    """odom_gt XY 배열 → SLAM/Gazebo 탑뷰 좌표 (플롯용).
-
-    _gz_to_odom_gt 의 역변환: (slam_x, slam_y) = (odom_y, -odom_x)
-    SLAM 프레임 ≈ Gazebo 프레임 (odom_gt가 90° 회전된 중간 프레임)
-    """
-    return np.column_stack([xy[:, 1], -xy[:, 0]])
-
-
-def _to_slam_view_pt(x, y):
-    """odom_gt 단일 좌표 → SLAM/Gazebo 뷰."""
-    return y, -x
-
-
 def extract_yaws(traj: PoseTrajectory3D) -> np.ndarray:
     """궤적에서 yaw 배열 추출 (rad)."""
     yaws = np.zeros(traj.num_poses)
@@ -634,11 +643,11 @@ def extract_yaws(traj: PoseTrajectory3D) -> np.ndarray:
 
 def plot_trajectories_2d(traj_gt, traj_est_dict, output_dir, landmarks=None,
                          aruco_visibility=None):
-    """2D XY 궤적 비교 그래프 (SLAM/Gazebo 뷰). aruco_visibility가 있으면 미감지 구간 표시."""
+    """2D XY 궤적 비교 그래프 (Gazebo 프레임). aruco_visibility가 있으면 미감지 구간 표시."""
     fig, ax = plt.subplots(figsize=(10, 8))
 
-    # odom_gt → SLAM/Gazebo 뷰 변환
-    gt_xy = _to_slam_view(traj_gt.positions_xyz[:, :2])
+    # 모든 데이터가 Gazebo 프레임으로 통일되어 있으므로 직접 사용
+    gt_xy = traj_gt.positions_xyz[:, :2]
     ax.plot(gt_xy[:, 0], gt_xy[:, 1], "k-", linewidth=2.0, label="GT", zorder=3)
     ax.plot(gt_xy[0, 0], gt_xy[0, 1], "go", markersize=10, label="Start", zorder=5)
     ax.plot(gt_xy[-1, 0], gt_xy[-1, 1], "rx", markersize=10, mew=2, label="End", zorder=5)
@@ -679,54 +688,48 @@ def plot_trajectories_2d(traj_gt, traj_est_dict, output_dir, landmarks=None,
     # 추정 궤적
     colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728"]
     for idx, (name, traj) in enumerate(traj_est_dict.items()):
-        xy = _to_slam_view(traj.positions_xyz[:, :2])
+        xy = traj.positions_xyz[:, :2]
         color = colors[idx % len(colors)]
         ax.plot(xy[:, 0], xy[:, 1], "-", color=color, linewidth=1.5,
                 label=name, alpha=0.8, zorder=2)
 
-    # 랜드마크 (사각형 + 헤딩 화살표)
+    # 랜드마크 (사각형 + 헤딩 화살표) — 모두 Gazebo 프레임
     if landmarks:
         gt_lm = landmarks.get("gt_landmarks", {})
         est_lm = landmarks.get("est_landmarks", {})
         marker_info = compute_marker_gt_positions()
 
         for mid, pos in gt_lm.items():
-            sp = _to_slam_view_pt(pos[0], pos[1])
             if mid in marker_info:
                 info = marker_info[mid]
                 box_x, box_y = info["box"]
-                bsx, bsy = _to_slam_view_pt(box_x, box_y)
                 yaw = info["yaw"]
                 normal_yaw = info["normal_yaw"]
-                # yaw/normal_yaw도 SLAM 뷰로 회전 (+90°)
-                yaw_s = yaw + math.pi / 2
-                normal_yaw_s = normal_yaw + math.pi / 2
                 half = BOX_SIZE / 2.0
                 corners_local = np.array([
                     [-half, -half], [half, -half],
                     [half, half], [-half, half], [-half, -half]])
-                cos_y, sin_y = np.cos(yaw_s), np.sin(yaw_s)
+                cos_y, sin_y = np.cos(yaw), np.sin(yaw)
                 corners_world = np.column_stack([
-                    bsx + corners_local[:, 0]*cos_y - corners_local[:, 1]*sin_y,
-                    bsy + corners_local[:, 0]*sin_y + corners_local[:, 1]*cos_y])
+                    box_x + corners_local[:, 0]*cos_y - corners_local[:, 1]*sin_y,
+                    box_y + corners_local[:, 0]*sin_y + corners_local[:, 1]*cos_y])
                 ax.plot(corners_world[:, 0], corners_world[:, 1],
                         "k-", linewidth=1.0, zorder=4)
                 arrow_len = 0.3
-                ax.annotate("", xy=(sp[0] + arrow_len*np.cos(normal_yaw_s),
-                                    sp[1] + arrow_len*np.sin(normal_yaw_s)),
-                            xytext=(sp[0], sp[1]),
+                ax.annotate("", xy=(pos[0] + arrow_len*np.cos(normal_yaw),
+                                    pos[1] + arrow_len*np.sin(normal_yaw)),
+                            xytext=(pos[0], pos[1]),
                             arrowprops=dict(arrowstyle="->", color="black",
                                             lw=1.5), zorder=5)
-            ax.annotate(f"M{mid}", sp, fontsize=7,
+            ax.annotate(f"M{mid}", (pos[0], pos[1]), fontsize=7,
                         xytext=(3, 3), textcoords="offset points", zorder=6)
 
         for mid, pos in est_lm.items():
-            sp = _to_slam_view_pt(pos[0], pos[1])
-            ax.plot(sp[0], sp[1], "m^", markersize=6, alpha=0.7, zorder=4)
+            ax.plot(pos[0], pos[1], "m^", markersize=6, alpha=0.7, zorder=4)
 
     ax.set_xlabel("X (m)")
     ax.set_ylabel("Y (m)")
-    ax.set_title("2D Trajectory Comparison (SLAM View)")
+    ax.set_title("2D Trajectory Comparison (Gazebo Frame)")
     ax.legend(loc="best")
     ax.set_aspect("equal")
     ax.grid(True, alpha=0.3)
@@ -843,51 +846,47 @@ def plot_rpe_by_delta(rpe_results, output_dir):
 
 
 def plot_landmark_comparison(lm_result, output_dir):
-    """GT vs 추정 랜드마크 위치 비교 (SLAM/Gazebo 뷰)."""
+    """GT vs 추정 랜드마크 위치 비교 (Gazebo 프레임)."""
     gt_lm = lm_result["gt_landmarks"]
     est_lm = lm_result["est_landmarks"]
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
 
-    # 2D 위치 비교 (사각형 + 헤딩) — SLAM 뷰 좌표
+    # 2D 위치 비교 (사각형 + 헤딩) — Gazebo 프레임 직접 사용
     marker_info = compute_marker_gt_positions()
     for mid in sorted(gt_lm.keys()):
         gt_pos = gt_lm[mid]
-        gt_sx, gt_sy = _to_slam_view_pt(gt_pos[0], gt_pos[1])
-        # GT 마커 박스 사각형
         if mid in marker_info:
             info = marker_info[mid]
             box_x, box_y = info["box"]
-            yaw = info["yaw"] + np.pi / 2  # odom_gt→SLAM 뷰 회전 보정
-            normal_yaw = info["normal_yaw"] + np.pi / 2
-            sb_x, sb_y = _to_slam_view_pt(box_x, box_y)
+            yaw = info["yaw"]
+            normal_yaw = info["normal_yaw"]
             half = BOX_SIZE / 2.0
             corners_local = np.array([
                 [-half, -half], [half, -half],
                 [half, half], [-half, half], [-half, -half]])
             cos_y, sin_y = np.cos(yaw), np.sin(yaw)
             corners_world = np.column_stack([
-                sb_x + corners_local[:, 0]*cos_y - corners_local[:, 1]*sin_y,
-                sb_y + corners_local[:, 0]*sin_y + corners_local[:, 1]*cos_y])
+                box_x + corners_local[:, 0]*cos_y - corners_local[:, 1]*sin_y,
+                box_y + corners_local[:, 0]*sin_y + corners_local[:, 1]*cos_y])
             ax1.plot(corners_world[:, 0], corners_world[:, 1],
                      "k-", linewidth=1.0, zorder=3)
-            ax1.annotate("", xy=(gt_sx + 0.3*np.cos(normal_yaw),
-                                 gt_sy + 0.3*np.sin(normal_yaw)),
-                         xytext=(gt_sx, gt_sy),
+            ax1.annotate("", xy=(gt_pos[0] + 0.3*np.cos(normal_yaw),
+                                 gt_pos[1] + 0.3*np.sin(normal_yaw)),
+                         xytext=(gt_pos[0], gt_pos[1]),
                          arrowprops=dict(arrowstyle="->", color="black", lw=1.5),
                          zorder=4)
-        ax1.annotate(f"GT {mid}", (gt_sx, gt_sy),
+        ax1.annotate(f"GT {mid}", (gt_pos[0], gt_pos[1]),
                      fontsize=7, xytext=(-10, 8), textcoords="offset points")
         if mid in est_lm:
             est_pos = est_lm[mid][:2]
-            es_x, es_y = _to_slam_view_pt(est_pos[0], est_pos[1])
-            ax1.plot(es_x, es_y, "r^", markersize=8, alpha=0.7)
-            ax1.plot([gt_sx, es_x], [gt_sy, es_y],
+            ax1.plot(est_pos[0], est_pos[1], "r^", markersize=8, alpha=0.7)
+            ax1.plot([gt_pos[0], est_pos[0]], [gt_pos[1], est_pos[1]],
                      "r--", alpha=0.4, linewidth=0.8)
 
     ax1.set_xlabel("X (m)")
     ax1.set_ylabel("Y (m)")
-    ax1.set_title("Landmark Positions: GT (black) vs SLAM (red) [SLAM View]")
+    ax1.set_title("Landmark Positions: GT vs SLAM (Gazebo Frame)")
     ax1.set_aspect("equal")
     ax1.grid(True, alpha=0.3)
 
@@ -1140,6 +1139,11 @@ def main():
     if len(gt_data) < 10:
         print(f"[오류] GT 데이터가 부족합니다 ({len(gt_data)}개).")
         sys.exit(1)
+
+    # odom_gt → Gazebo 프레임 변환 (GT 랜드마크와 동일 좌표계로 통일)
+    if gt_topic == "/odom_gt":
+        gt_data = _odom_gt_to_gazebo(gt_data)
+        print("  [좌표 변환] /odom_gt → Gazebo 월드 프레임")
 
     est_data_dict = {}
     for topic in est_topics:
