@@ -542,6 +542,17 @@ public:
 
         imuPreintegrator_->resetIntegrationAndSetBias(currentBias_);
 
+        // IMU 큐 지연 진단: 큐 최신 데이터 vs 요청 시각
+        if (!rawImuQueue_.empty()) {
+            double newestImu = stamp2Sec(rawImuQueue_.back().header.stamp);
+            double lag = toTime.seconds() - newestImu;
+            if (lag > 0.1) {
+                RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+                    "[IMU] Queue lag=%.3fs (newest=%.3f, requested=%.3f, qsize=%zu)",
+                    lag, newestImu, toTime.seconds(), rawImuQueue_.size());
+            }
+        }
+
         double lastT = fromTime.seconds();
         int count = 0;
 
