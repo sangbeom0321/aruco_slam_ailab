@@ -62,25 +62,31 @@ except ImportError:
 
 # ─────────────────────────────────────────────
 # Gazebo 마커 GT 위치 (gazebo_aruco.launch.py)
-# 박스 중심 좌표 (X, Y). 마커는 -X face에 부착 (중심에서 0.251m offset)
-# 각 박스 yaw = atan2(center_y - y, center_x - x) + π
-# center = (1.495, -2.425)
+# 원본 Gazebo 좌표를 /odom_gt 프레임으로 변환하여 사용
+# 변환: (odom_gt_x, odom_gt_y) = (-gz_y, gz_x)
+# (wheel_odom_node.py:gazebo_pose_to_ros + 원점 리셋 재현)
+# 로봇 스폰: Gazebo (0, 0), yaw=-90°
 # ─────────────────────────────────────────────
+def _gz_to_odom_gt(gz_x, gz_y):
+    """Gazebo 월드 좌표 → /odom_gt 프레임 변환."""
+    return (-gz_y, gz_x)
+
+
 GAZEBO_BOX_CENTERS = {
-    11: (0.0, 3.0),
-    12: (1.9, 3.0),
-    13: (1.9, -1.5),
-    14: (4.6, -1.5),
-    15: (4.6, -3.75),
-    16: (4.6, -6.0),
-    17: (1.45, -6.0),
-    18: (-1.7, -6.0),
-    19: (-1.9, 3.0),
-    20: (-1.7, -1.5),
+    11: _gz_to_odom_gt(0.0, 3.0),
+    12: _gz_to_odom_gt(1.9, 3.0),
+    13: _gz_to_odom_gt(1.9, -1.5),
+    14: _gz_to_odom_gt(4.6, -1.5),
+    15: _gz_to_odom_gt(4.6, -3.75),
+    16: _gz_to_odom_gt(4.6, -6.0),
+    17: _gz_to_odom_gt(1.45, -6.0),
+    18: _gz_to_odom_gt(-1.7, -6.0),
+    19: _gz_to_odom_gt(-1.9, 3.0),
+    20: _gz_to_odom_gt(-1.7, -1.5),
 }
 MARKER_FACE_OFFSET = 0.251  # 박스 중심 → -X face (마커 부착면) 거리 (m)
 BOX_SIZE = 0.50  # 박스 한 변 길이 (m)
-BOX_CENTER = (1.495, -2.425)  # 모든 박스가 바라보는 중심점
+BOX_CENTER = _gz_to_odom_gt(1.495, -2.425)  # 모든 박스가 바라보는 중심점
 
 
 def compute_marker_gt_positions():
@@ -491,9 +497,9 @@ def compute_landmark_accuracy(landmarks_map_path: str,
     """
     SLAM landmarks vs Gazebo GT markers.
 
-    GT landmarks are in raw Gazebo world frame (same as /odom_gt).
+    GT landmarks are in /odom_gt frame (Gazebo→ROS 변환 + 원점 리셋 적용).
     SLAM landmarks are in SLAM map frame.
-    T_align (from Umeyama) maps SLAM frame → GT frame.
+    T_align (from Umeyama) maps SLAM frame → GT(/odom_gt) frame.
     """
     with open(landmarks_map_path, "r") as f:
         data = json.load(f)
