@@ -472,6 +472,20 @@ def normalize_angle(angle: float) -> float:
     return angle
 
 
+def quat_to_yaw_2d(qw, qx, qy, qz) -> float:
+    """쿼터니언 → 2D yaw (Z축 기준, 마커 법선 방향)."""
+    # Rotation matrix의 Z axis (col 2)를 XY 평면에 투영하여 yaw 추출
+    # marker Z axis = rotation matrix의 3번째 열
+    R = np.array([
+        [1 - 2*(qy*qy + qz*qz), 2*(qx*qy - qw*qz), 2*(qx*qz + qw*qy)],
+        [2*(qx*qy + qw*qz), 1 - 2*(qx*qx + qz*qz), 2*(qy*qz - qw*qx)],
+        [2*(qx*qz - qw*qy), 2*(qy*qz + qw*qx), 1 - 2*(qx*qx + qy*qy)],
+    ])
+    # 마커 Z axis의 XY 투영 → yaw
+    marker_z_xy = R[:2, 2]
+    return math.atan2(marker_z_xy[1], marker_z_xy[0])
+
+
 def compute_landmark_accuracy(landmarks_map_path: str,
                               T_align: np.ndarray = None) -> dict:
     """
@@ -484,22 +498,31 @@ def compute_landmark_accuracy(landmarks_map_path: str,
     with open(landmarks_map_path, "r") as f:
         data = json.load(f)
 
-    # SLAM landmarks (SLAM map frame)
+    # SLAM landmarks (SLAM map frame) — position + orientation
     est_landmarks_raw = {}
+    est_orientations_raw = {}
     for lm in data["landmarks"]:
         est_landmarks_raw[lm["id"]] = np.array([
             lm["position"]["x"],
             lm["position"]["y"],
             lm["position"]["z"],
         ])
+        ori = lm.get("orientation", {})
+        if ori:
+            est_orientations_raw[lm["id"]] = (
+                ori.get("w", 1.0), ori.get("x", 0.0),
+                ori.get("y", 0.0), ori.get("z", 0.0))
 
-    # GT landmarks: raw Gazebo XY (same frame as GT trajectory)
+    # GT landmarks: marker face position + normal direction
     gt_landmarks = {}
+    gt_marker_info = compute_marker_gt_positions()
     for mid, (gx, gy) in GAZEBO_MARKER_POSITIONS.items():
         gt_landmarks[mid] = np.array([gx, gy])
 
     # SLAM landmarks → GT frame via T_align
     est_landmarks = {}
+    est_yaws = {}
+    R_align = T_align[:3, :3] if T_align is not None else np.eye(3)
     for mid, pos3d in est_landmarks_raw.items():
         if T_align is not None:
             p_hom = np.array([pos3d[0], pos3d[1], pos3d[2], 1.0])
@@ -507,14 +530,31 @@ def compute_landmark_accuracy(landmarks_map_path: str,
             est_landmarks[mid] = p_aligned[:3]
         else:
             est_landmarks[mid] = pos3d
+        # orientation → GT frame으로 변환 후 yaw 추출
+        if mid in est_orientations_raw:
+            qw, qx, qy, qz = est_orientations_raw[mid]
+            R_marker = np.array([
+                [1-2*(qy*qy+qz*qz), 2*(qx*qy-qw*qz), 2*(qx*qz+qw*qy)],
+                [2*(qx*qy+qw*qz), 1-2*(qx*qx+qz*qz), 2*(qy*qz-qw*qx)],
+                [2*(qx*qz-qw*qy), 2*(qy*qz+qw*qx), 1-2*(qx*qx+qy*qy)]])
+            R_aligned = R_align @ R_marker
+            marker_z_xy = R_aligned[:2, 2]
+            est_yaws[mid] = math.atan2(marker_z_xy[1], marker_z_xy[0])
 
-    # 2D comparison
+    # Position + Orientation comparison
     per_marker = {}
+    per_marker_yaw = {}
     for mid in sorted(set(est_landmarks.keys()) & set(gt_landmarks.keys())):
         est_xy = est_landmarks[mid][:2]
         gt_xy = gt_landmarks[mid]
         err = np.linalg.norm(est_xy - gt_xy)
         per_marker[mid] = err
+        # Yaw error: SLAM marker normal vs GT marker normal
+        if mid in est_yaws and mid in gt_marker_info:
+            gt_normal = gt_marker_info[mid]["normal_yaw"]
+            est_normal = est_yaws[mid]
+            yaw_err = abs(normalize_angle(est_normal - gt_normal))
+            per_marker_yaw[mid] = math.degrees(yaw_err)
 
     if not per_marker:
         return {"per_marker": {}, "mean_error": float("nan"), "max_error": float("nan")}
@@ -522,7 +562,7 @@ def compute_landmark_accuracy(landmarks_map_path: str,
     errors = list(per_marker.values())
     max_id = max(per_marker, key=per_marker.get)
 
-    return {
+    result = {
         "per_marker": per_marker,
         "mean_error": float(np.mean(errors)),
         "max_error": float(np.max(errors)),
@@ -530,6 +570,12 @@ def compute_landmark_accuracy(landmarks_map_path: str,
         "est_landmarks": est_landmarks,
         "gt_landmarks": gt_landmarks,
     }
+    if per_marker_yaw:
+        yaw_errors = list(per_marker_yaw.values())
+        result["per_marker_yaw"] = per_marker_yaw
+        result["mean_yaw_error"] = float(np.mean(yaw_errors))
+        result["max_yaw_error"] = float(np.max(yaw_errors))
+    return result
 
 
 # ═══════════════════════════════════════════════
@@ -902,8 +948,13 @@ def print_summary(ape, rpe_list, drift, lm_result, alignment_info, gt_topic, est
         print("  [Landmark Accuracy]")
         print(f"    Mean Error: {lm_result['mean_error']:.4f} m")
         print(f"    Max Error:  {lm_result['max_error']:.4f} m (ID {lm_result['max_error_id']})")
+        if "mean_yaw_error" in lm_result:
+            print(f"    Mean Yaw Error: {lm_result['mean_yaw_error']:.2f}\u00b0")
+            print(f"    Max Yaw Error:  {lm_result['max_yaw_error']:.2f}\u00b0")
+        per_yaw = lm_result.get("per_marker_yaw", {})
         for mid, err in sorted(lm_result["per_marker"].items()):
-            print(f"    Marker {mid}: {err:.4f} m")
+            yaw_str = f"  yaw={per_yaw[mid]:.1f}\u00b0" if mid in per_yaw else ""
+            print(f"    Marker {mid}: {err:.4f} m{yaw_str}")
 
     print("=" * 62)
     print()
@@ -936,8 +987,14 @@ def save_metrics_csv(ape, rpe_list, drift, lm_result, output_dir):
         if lm_result and not math.isnan(lm_result.get("mean_error", float("nan"))):
             f.write(f"landmark_mean_error,{lm_result['mean_error']:.6f}\n")
             f.write(f"landmark_max_error,{lm_result['max_error']:.6f}\n")
+            if "mean_yaw_error" in lm_result:
+                f.write(f"landmark_mean_yaw_error_deg,{lm_result['mean_yaw_error']:.6f}\n")
+                f.write(f"landmark_max_yaw_error_deg,{lm_result['max_yaw_error']:.6f}\n")
+            per_yaw = lm_result.get("per_marker_yaw", {})
             for mid, err in sorted(lm_result["per_marker"].items()):
                 f.write(f"landmark_{mid}_error,{err:.6f}\n")
+                if mid in per_yaw:
+                    f.write(f"landmark_{mid}_yaw_error_deg,{per_yaw[mid]:.6f}\n")
 
     print(f"  CSV 저장: {filepath}")
 
