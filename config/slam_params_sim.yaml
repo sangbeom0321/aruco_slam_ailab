@@ -50,7 +50,7 @@
     # 역할: 누적 드리프트 보정. rotation은 loose → heading 지배 방지, IMU가 담당
     aruco_trans_noise: 0.10    # 기본 σ (거리/각도별 dynamic scaling 적용됨)
     aruco_rot_noise: 0.50      # rotation 느슨하게 → heading은 IMU 주도
-    aruco_max_range: 3.0       # 최대 관측 거리 (m), 초과 시 무시 (4.0→3.0: 원거리 노이즈 관측 차단)
+    aruco_max_range: 100.0     # 거리 필터 해제 (노이즈 보정만 적용)
     aruco_min_viewing_angle: 0.0   # 정면 관측 필터 해제 (모든 각도 허용)
 
     # Wheel odometry BetweenFactor parameters
