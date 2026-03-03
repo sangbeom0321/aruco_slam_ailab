@@ -499,8 +499,13 @@ def compute_landmark_accuracy(landmarks_map_path: str,
 
     GT landmarks are in /odom_gt frame (Gazebo→ROS 변환 + 원점 리셋 적용).
     SLAM landmarks are in SLAM map frame.
-    T_align (from Umeyama) maps SLAM frame → GT(/odom_gt) frame.
+
+    랜드마크 전용 Umeyama SE(3) 정렬을 사용하여 SLAM 랜드마크 프레임 →
+    GT(/odom_gt) 프레임 변환을 계산합니다.
+    (궤적 T_align과 랜드마크 프레임이 다를 수 있으므로 별도 정렬)
     """
+    from evo.core.geometry import umeyama_alignment
+
     with open(landmarks_map_path, "r") as f:
         data = json.load(f)
 
@@ -525,17 +530,33 @@ def compute_landmark_accuracy(landmarks_map_path: str,
     for mid, (gx, gy) in GAZEBO_MARKER_POSITIONS.items():
         gt_landmarks[mid] = np.array([gx, gy])
 
-    # SLAM landmarks → GT frame via T_align
+    # 공통 마커 ID로 랜드마크 전용 Umeyama 정렬
+    common_ids = sorted(set(est_landmarks_raw.keys()) & set(gt_landmarks.keys()))
+    if len(common_ids) < 3:
+        print(f"  [경고] 공통 랜드마크 {len(common_ids)}개 (최소 3개 필요)")
+        return {"per_marker": {}, "mean_error": float("nan"), "max_error": float("nan")}
+
+    slam_pts = np.array([est_landmarks_raw[mid] for mid in common_ids])  # Nx3
+    gt_pts_2d = np.array([gt_landmarks[mid] for mid in common_ids])      # Nx2
+    gt_pts_3d = np.column_stack([gt_pts_2d, np.zeros(len(gt_pts_2d))])   # Nx3
+
+    R_lm, t_lm, _ = umeyama_alignment(slam_pts.T, gt_pts_3d.T, with_scale=False)
+    T_lm = np.eye(4)
+    T_lm[:3, :3] = R_lm
+    T_lm[:3, 3] = t_lm
+
+    lm_rot_deg = math.degrees(math.atan2(R_lm[1, 0], R_lm[0, 0]))
+    print(f"  [랜드마크 정렬] rotation={lm_rot_deg:.2f}°, "
+          f"translation=({t_lm[0]:.3f}, {t_lm[1]:.3f})")
+
+    # SLAM landmarks → GT frame via 랜드마크 전용 T_lm
     est_landmarks = {}
     est_yaws = {}
-    R_align = T_align[:3, :3] if T_align is not None else np.eye(3)
+    R_align = T_lm[:3, :3]
     for mid, pos3d in est_landmarks_raw.items():
-        if T_align is not None:
-            p_hom = np.array([pos3d[0], pos3d[1], pos3d[2], 1.0])
-            p_aligned = T_align @ p_hom
-            est_landmarks[mid] = p_aligned[:3]
-        else:
-            est_landmarks[mid] = pos3d
+        p_hom = np.array([pos3d[0], pos3d[1], pos3d[2], 1.0])
+        p_aligned = T_lm @ p_hom
+        est_landmarks[mid] = p_aligned[:3]
         # orientation → GT frame으로 변환 후 yaw 추출
         if mid in est_orientations_raw:
             qw, qx, qy, qz = est_orientations_raw[mid]
@@ -575,6 +596,7 @@ def compute_landmark_accuracy(landmarks_map_path: str,
         "max_error_id": max_id,
         "est_landmarks": est_landmarks,
         "gt_landmarks": gt_landmarks,
+        "T_landmark_align": T_lm,
     }
     if per_marker_yaw:
         yaw_errors = list(per_marker_yaw.values())
