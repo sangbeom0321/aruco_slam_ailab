@@ -53,7 +53,9 @@ def launch_setup(context, *args, **kwargs):
         executable='aruco_detector_node',
         name='aruco_detector_front',
         parameters=[aruco_params],
-        output='screen'
+        output='screen',
+        respawn=True,
+        respawn_delay=2.0,
     )
 
     # SLAM Backend
@@ -165,7 +167,7 @@ def launch_setup(context, *args, **kwargs):
         ekf_smoother_node,
         landmark_boundary_map_node,
         ego_state_node,
-        # rviz_node,
+        rviz_node,
     ]
 
 

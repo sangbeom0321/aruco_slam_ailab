@@ -325,21 +325,22 @@ private:
 
                 visualization_msgs::msg::MarkerArray vis_marker_array;
                 const double axis_scale = marker_size_ * 0.6;
-                const size_t n = ids.size();
-                vis_marker_array.markers.reserve(n * 5);
+                const size_t n_filtered = marker_array.markers.size();
+                vis_marker_array.markers.reserve(n_filtered * 5);
+                int vis_id = 0;  // 프레임마다 리셋하여 고정 ID 풀 사용
 
-                for (size_t idx = 0; idx < n; ++idx) {
-                    int mid = ids[idx];
+                for (size_t idx = 0; idx < n_filtered; ++idx) {
                     const auto& obs = marker_array.markers[idx];
+                    int mid = obs.id;
                     double r = ((mid * 37) % 255) / 255.0;
                     double g = ((mid * 73) % 255) / 255.0;
                     double b = ((mid * 113) % 255) / 255.0;
 
-                    // 1) 마커 평면 큐브 (고유 ID로 누적)
+                    // 1) 마커 평면 큐브 (마커 ID 기반 고정 ID, lifetime으로 자동 소멸)
                     visualization_msgs::msg::Marker cube;
                     cube.header = vis_header;
                     cube.ns = "aruco_cubes";
-                    cube.id = vis_marker_id_counter_++;
+                    cube.id = vis_id++;
                     cube.type = visualization_msgs::msg::Marker::CUBE;
                     cube.action = visualization_msgs::msg::Marker::ADD;
                     cube.pose = obs.pose;
@@ -351,14 +352,14 @@ private:
                     cube.color.g = g;
                     cube.color.b = b;
                     cube.lifetime.sec = 0;
-                    cube.lifetime.nanosec = 0;
+                    cube.lifetime.nanosec = 500000000;  // 0.5초 후 자동 소멸
                     vis_marker_array.markers.push_back(cube);
 
                     // 2) 마커 중심 3D 위치 구
                     visualization_msgs::msg::Marker sphere;
                     sphere.header = vis_header;
                     sphere.ns = "aruco_centers";
-                    sphere.id = vis_marker_id_counter_++;
+                    sphere.id = vis_id++;
                     sphere.type = visualization_msgs::msg::Marker::SPHERE;
                     sphere.action = visualization_msgs::msg::Marker::ADD;
                     sphere.pose.position = obs.pose.position;
@@ -370,14 +371,14 @@ private:
                     sphere.color.g = g;
                     sphere.color.b = b;
                     sphere.lifetime.sec = 0;
-                    sphere.lifetime.nanosec = 0;
+                    sphere.lifetime.nanosec = 500000000;
                     vis_marker_array.markers.push_back(sphere);
 
                     // 3) ID 텍스트
                     visualization_msgs::msg::Marker text;
                     text.header = vis_header;
                     text.ns = "aruco_labels";
-                    text.id = vis_marker_id_counter_++;
+                    text.id = vis_id++;
                     text.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
                     text.action = visualization_msgs::msg::Marker::ADD;
                     text.pose.position = obs.pose.position;
@@ -391,7 +392,7 @@ private:
                     text.color.b = 1.0;
                     text.text = "ID:" + std::to_string(mid);
                     text.lifetime.sec = 0;
-                    text.lifetime.nanosec = 0;
+                    text.lifetime.nanosec = 500000000;
                     vis_marker_array.markers.push_back(text);
 
                     // 4) 좌표축: X(빨강), Y(초록), Z(파랑) 화살표
@@ -413,7 +414,7 @@ private:
                         visualization_msgs::msg::Marker ar;
                         ar.header = vis_header;
                         ar.ns = "aruco_axes";
-                        ar.id = vis_marker_id_counter_++;
+                        ar.id = vis_id++;
                         ar.type = visualization_msgs::msg::Marker::ARROW;
                         ar.action = visualization_msgs::msg::Marker::ADD;
                         geometry_msgs::msg::Point end;
@@ -431,7 +432,7 @@ private:
                         ar.color.g = cg;
                         ar.color.b = cb;
                         ar.lifetime.sec = 0;
-                        ar.lifetime.nanosec = 0;
+                        ar.lifetime.nanosec = 500000000;
                         vis_marker_array.markers.push_back(ar);
                     };
                     arrow(0, 1, 0, 0, 1.0f, 0.0f, 0.0f);  // X
@@ -520,7 +521,7 @@ private:
     bool camera_matrix_initialized_ = false;
 
     double marker_size_;
-    int vis_marker_id_counter_ = 0;  // 3D 시각화 마커 누적용 고유 ID
+    // vis_marker_id_counter_ 제거: 프레임마다 로컬 vis_id로 리셋하여 메모리 누수 방지
     std::set<int> allowed_marker_ids_;  // empty = allow all
 
     bool use_depth_correction_ = true;
