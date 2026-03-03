@@ -28,7 +28,7 @@
     ext_rot_base_cam: [0.0, 0.0, 1.0, -1.0, 0.0, 0.0, 0.0, -1.0, 0.0]
 
     # base_footprint -> camera_depth_optical_frame (Gazebo tf2_echo)
-    ext_trans_base_depth_cam: [0.411, 0.048, 0.398]
+    ext_trans_base_depth_cam: [0.411, 0.049, 0.398]
     ext_rot_base_depth_cam: [0.0, 0.0, 1.0, -1.0, 0.0, 0.0, 0.0, -1.0, 0.0]
 
     # base_footprint -> IMU frame (Gazebo: IMU on chassis, 거의 동일 위치)
@@ -48,9 +48,9 @@
 
     # ArUco observation parameters
     # 역할: 누적 드리프트 보정. rotation은 loose → heading 지배 방지, IMU가 담당
-    aruco_trans_noise: 0.08    # 기본 σ (거리/각도별 dynamic scaling 적용됨)
+    aruco_trans_noise: 0.10    # 기본 σ (거리/각도별 dynamic scaling 적용됨)
     aruco_rot_noise: 0.50      # rotation 느슨하게 → heading은 IMU 주도
-    aruco_max_range: 4.0       # 최대 관측 거리 (m), 초과 시 무시
+    aruco_max_range: 3.0       # 최대 관측 거리 (m), 초과 시 무시 (4.0→3.0: 원거리 노이즈 관측 차단)
     aruco_min_viewing_angle: 0.17  # 최소 viewing angle (rad, ~10°), 정면 관측 스킵
 
     # Wheel odometry BetweenFactor parameters

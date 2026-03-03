@@ -9,6 +9,7 @@
 #include <gtsam/geometry/Pose3.h>
 #include <gtsam/navigation/ImuFactor.h>
 #include <gtsam/navigation/ImuBias.h>
+#include <gtsam/linear/NoiseModel.h>
 
 #include <sensor_msgs/msg/imu.hpp>
 #include <nav_msgs/msg/path.hpp>
@@ -1008,15 +1009,19 @@ public:
             }
 
             // ── Dynamic noise model ──
-            // 거리 비례: 1m→1.3x, 3m→1.9x, 4m→2.2x
-            double range_factor = 1.0 + 0.3 * range;
+            // 제곱 거리 비례 (stereo depth 오차 σ∝z²/fB): 1m→1.15x, 2m→1.6x, 3m→2.35x
+            double range_factor = 1.0 + 0.15 * range * range;
             // 정면일수록 depth 불확실: head-on(cos≈1)→2.5x, 45°→1.75x, edge-on(cos≈0)→1x
             double angle_factor = 1.0 + 1.5 * cos_angle * cos_angle;
             double sigma_t = arucoTransNoise * range_factor * angle_factor;
 
-            auto dynamicNoise = gtsam::noiseModel::Diagonal::Sigmas(
+            auto gaussianNoise = gtsam::noiseModel::Diagonal::Sigmas(
                 (gtsam::Vector(6) << 0.05, 0.05, arucoRotNoise,
                                       sigma_t, sigma_t, 0.03).finished());
+            // Robust Huber kernel: outlier 관측의 영향력 제한 (k=1.345 → 정규분포 95% 효율)
+            auto dynamicNoise = gtsam::noiseModel::Robust::Create(
+                gtsam::noiseModel::mEstimator::Huber::Create(1.345),
+                gaussianNoise);
 
             bool knownLandmark = (landmarkIdToKey_.find(mid) != landmarkIdToKey_.end());
 
