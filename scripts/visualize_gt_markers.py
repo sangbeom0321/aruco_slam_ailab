@@ -675,20 +675,7 @@ def main():
          _, _, _) = _align_to_gt(
             ekf_ts, ekf_x, ekf_y, ekf_yaw, "EKF")
 
-    # ── Real bag (no GT): raw trajectories + raw landmarks ──
     has_gt = gt_ts is not None and len(gt_ts) > 0
-    if not has_gt and args.bag:
-        # SLAM trajectory: use raw (unaligned)
-        if slam_ts is not None and len(slam_ts) > 0:
-            slam_aligned_x, slam_aligned_y = slam_x, slam_y
-            slam_aligned_yaw = slam_yaw
-        # EKF trajectory: use raw (unaligned)
-        if ekf_ts is not None and len(ekf_ts) > 0:
-            ekf_aligned_x, ekf_aligned_y = ekf_x, ekf_y
-            ekf_aligned_yaw = ekf_yaw
-        # SLAM landmarks: use raw (unaligned)
-        if slam_ts is not None:
-            slam_lm_aligned = extract_slam_landmarks(args.bag)
 
     # ── Compute metrics (full + per-loop) ──
     gt_split = slam_split = None
@@ -745,35 +732,12 @@ def main():
                 "Loop 2", idx_s[mask2], idx_g[mask2],
                 slam_aligned_x, slam_aligned_y, slam_aligned_yaw)
 
-    # ── Helper: draw SLAM landmarks only (no GT boxes) ──
-    def _draw_slam_landmarks_only(ax, landmarks):
-        """Draw SLAM estimated landmarks without GT reference."""
-        if not landmarks:
-            return
-        for mid, (sx, sy, syaw) in landmarks.items():
-            ax.plot(sx, sy, "D", color="magenta", markersize=7,
-                    markeredgecolor="black", markeredgewidth=0.5, zorder=8)
-            ax.annotate(f"{mid}", (sx, sy),
-                        textcoords="offset points", xytext=(0, 10),
-                        fontsize=8, fontweight="bold", ha="center",
-                        color="darkblue", zorder=9)
-            # SLAM landmark normal direction
-            ax.annotate("", xy=(sx + 0.3*math.cos(syaw),
-                                sy + 0.3*math.sin(syaw)),
-                        xytext=(sx, sy),
-                        arrowprops=dict(arrowstyle="->,head_width=0.06,"
-                                        "head_length=0.05",
-                                        color="magenta", lw=1.2), zorder=9)
-
     # ── Helper: draw a single trajectory plot ──
     def _make_trajectory_plot(est_aligned_x, est_aligned_y, est_ts_arr,
                               est_label, est_color, show_landmarks):
         fig, ax = plt.subplots(1, 1, figsize=(12, 11))
         ax.set_aspect("equal")
-        if has_gt:
-            ax.set_title(f"GT vs {est_label}", fontsize=13)
-        else:
-            ax.set_title(f"{est_label} (Real)", fontsize=13)
+        ax.set_title(f"GT vs {est_label}", fontsize=13)
         ax.set_xlabel("X (m)")
         ax.set_ylabel("Y (m)")
 
@@ -783,18 +747,19 @@ def main():
         ax.yaxis.set_major_locator(MultipleLocator(1.0))
         ax.grid(True, alpha=0.3)
 
-        if has_gt:
-            # 공통 시간 구간으로 트림
-            gt_s = slice(None)
-            est_s = slice(None)
-            if (est_ts_arr is not None and len(est_ts_arr) > 0):
-                t_start = max(gt_ts[0], est_ts_arr[0])
-                t_end = min(gt_ts[-1], est_ts_arr[-1])
-                gt_s = slice(np.searchsorted(gt_ts, t_start),
-                             np.searchsorted(gt_ts, t_end, side='right'))
-                est_s = slice(np.searchsorted(est_ts_arr, t_start),
-                              np.searchsorted(est_ts_arr, t_end, side='right'))
+        # 공통 시간 구간으로 트림
+        gt_s = slice(None)
+        est_s = slice(None)
+        if (gt_ts is not None and est_ts_arr is not None
+                and len(gt_ts) > 0 and len(est_ts_arr) > 0):
+            t_start = max(gt_ts[0], est_ts_arr[0])
+            t_end = min(gt_ts[-1], est_ts_arr[-1])
+            gt_s = slice(np.searchsorted(gt_ts, t_start),
+                         np.searchsorted(gt_ts, t_end, side='right'))
+            est_s = slice(np.searchsorted(est_ts_arr, t_start),
+                          np.searchsorted(est_ts_arr, t_end, side='right'))
 
+        if gt_x is not None:
             gx, gy = gt_x[gt_s], gt_y[gt_s]
             ax.plot(gx, gy, "-", color="green", linewidth=1.5, alpha=0.8,
                     zorder=2, label="GT (/odom_gt)")
@@ -805,81 +770,44 @@ def main():
             if gt_blind_mask is not None:
                 draw_blind_zones(ax, gx, gy, gt_blind_mask[gt_s])
 
-            if est_aligned_x is not None:
-                ex, ey = est_aligned_x[est_s], est_aligned_y[est_s]
-                ax.plot(ex, ey, "-", color=est_color,
-                        linewidth=1.2, alpha=0.8, zorder=2, label=est_label)
-                ax.plot(ex[0], ey[0], "o",
-                        color=est_color, markersize=6, zorder=7)
-                ax.plot(ex[-1], ey[-1], "^",
-                        color=est_color, markersize=6, zorder=7)
+        if est_aligned_x is not None:
+            ex, ey = est_aligned_x[est_s], est_aligned_y[est_s]
+            ax.plot(ex, ey, "-", color=est_color,
+                    linewidth=1.2, alpha=0.8, zorder=2, label=est_label)
+            ax.plot(ex[0], ey[0], "o",
+                    color=est_color, markersize=6, zorder=7)
+            ax.plot(ex[-1], ey[-1], "^",
+                    color=est_color, markersize=6, zorder=7)
 
-            lm = slam_lm_aligned if show_landmarks else None
-            draw_boxes_and_markers(ax, lm)
-            set_common_limits(ax, gt_x, gt_y, est_aligned_x, est_aligned_y)
-        else:
-            # Real bag: raw trajectory only
-            if est_aligned_x is not None:
-                ax.plot(est_aligned_x, est_aligned_y, "-", color=est_color,
-                        linewidth=1.5, alpha=0.8, zorder=2, label=est_label)
-                ax.plot(est_aligned_x[0], est_aligned_y[0], "o",
-                        color=est_color, markersize=8, zorder=7)
-                ax.plot(est_aligned_x[-1], est_aligned_y[-1], "^",
-                        color=est_color, markersize=8, zorder=7)
-
-            if show_landmarks:
-                _draw_slam_landmarks_only(ax, slam_lm_aligned)
-
-            # Set limits from estimated trajectory + landmarks
-            all_x, all_y = [], []
-            if est_aligned_x is not None and len(est_aligned_x) > 0:
-                all_x.extend([est_aligned_x.min(), est_aligned_x.max()])
-                all_y.extend([est_aligned_y.min(), est_aligned_y.max()])
-            for mid, (lx, ly, _) in slam_lm_aligned.items():
-                all_x.append(lx)
-                all_y.append(ly)
-            if all_x:
-                pad = 1.2
-                ax.set_xlim(min(all_x) - pad, max(all_x) + pad)
-                ax.set_ylim(min(all_y) - pad, max(all_y) + pad)
+        lm = slam_lm_aligned if show_landmarks else None
+        draw_boxes_and_markers(ax, lm)
+        set_common_limits(ax, gt_x, gt_y, est_aligned_x, est_aligned_y)
 
         # Legend
         handles, _ = ax.get_legend_handles_labels()
-        if has_gt:
+        handles.extend([
+            mpatches.Patch(facecolor="moccasin", edgecolor="darkorange",
+                           label="GT Box"),
+            plt.Line2D([0], [0], color="red", linewidth=3,
+                       label="GT Marker Face"),
+            plt.Line2D([0], [0], color="blue", linewidth=1.2, marker=">",
+                       markersize=5, label="GT Normal"),
+        ])
+        if show_landmarks and slam_lm_aligned:
             handles.extend([
-                mpatches.Patch(facecolor="moccasin", edgecolor="darkorange",
-                               label="GT Box"),
-                plt.Line2D([0], [0], color="red", linewidth=3,
-                           label="GT Marker Face"),
-                plt.Line2D([0], [0], color="blue", linewidth=1.2, marker=">",
-                           markersize=5, label="GT Normal"),
+                plt.Line2D([0], [0], color="magenta", marker="D",
+                           linestyle="None", markersize=6,
+                           markeredgecolor="black", markeredgewidth=0.5,
+                           label="SLAM Landmark"),
+                plt.Line2D([0], [0], color="magenta", linewidth=1.2,
+                           marker=">", markersize=5, label="SLAM Normal"),
+                plt.Line2D([0], [0], color="gray", linestyle="--",
+                           linewidth=0.8, label="Landmark Error"),
             ])
-            if show_landmarks and slam_lm_aligned:
-                handles.extend([
-                    plt.Line2D([0], [0], color="magenta", marker="D",
-                               linestyle="None", markersize=6,
-                               markeredgecolor="black", markeredgewidth=0.5,
-                               label="SLAM Landmark"),
-                    plt.Line2D([0], [0], color="magenta", linewidth=1.2,
-                               marker=">", markersize=5, label="SLAM Normal"),
-                    plt.Line2D([0], [0], color="gray", linestyle="--",
-                               linewidth=0.8, label="Landmark Error"),
-                ])
-            if gt_blind_mask is not None and np.any(gt_blind_mask):
-                handles.append(
-                    plt.Line2D([0], [0], color="red", linewidth=3.5, alpha=0.5,
-                               label="Blind Zone"))
-        else:
-            if show_landmarks and slam_lm_aligned:
-                handles.extend([
-                    plt.Line2D([0], [0], color="magenta", marker="D",
-                               linestyle="None", markersize=7,
-                               markeredgecolor="black", markeredgewidth=0.5,
-                               label="SLAM Landmark"),
-                    plt.Line2D([0], [0], color="magenta", linewidth=1.2,
-                               marker=">", markersize=5,
-                               label="Landmark Normal"),
-                ])
+        if gt_blind_mask is not None and np.any(gt_blind_mask):
+            handles.append(
+                plt.Line2D([0], [0], color="red", linewidth=3.5, alpha=0.5,
+                           label="Blind Zone"))
         handles.extend([
             plt.Line2D([0], [0], color="gray", marker="o", linestyle="None",
                        markersize=6, label="Start"),
