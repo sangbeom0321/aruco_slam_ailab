@@ -33,6 +33,8 @@ from visualize_gt_markers import (
     extract_odom_with_ts,
     extract_slam_landmarks,
     extract_aruco_detection_times,
+    compute_blind_mask,
+    draw_blind_zones,
     quat_to_yaw,
     normalize_angle,
 )
@@ -139,7 +141,8 @@ def draw_slam_landmarks(ax, landmarks):
 
 
 def make_trajectory_plot(traj_x, traj_y, traj_ts, label, color,
-                         landmarks, waypoints, wp_results, stops):
+                         landmarks, waypoints, wp_results, stops,
+                         blind_mask=None, flip_x=False):
     """Generate trajectory plot in user coordinate frame."""
     fig, ax = plt.subplots(1, 1, figsize=(12, 11))
     ax.set_aspect("equal")
@@ -160,6 +163,10 @@ def make_trajectory_plot(traj_x, traj_y, traj_ts, label, color,
                 zorder=7)
         ax.plot(traj_x[-1], traj_y[-1], "^", color=color, markersize=8,
                 zorder=7)
+
+    # Blind zones (ArUco 미인지 구간)
+    if blind_mask is not None and traj_x is not None:
+        draw_blind_zones(ax, traj_x, traj_y, blind_mask)
 
     # Landmarks
     draw_slam_landmarks(ax, landmarks)
@@ -206,6 +213,10 @@ def make_trajectory_plot(traj_x, traj_y, traj_ts, label, color,
         ax.set_xlim(min(all_x) - pad, max(all_x) + pad)
         ax.set_ylim(min(all_y) - pad, max(all_y) + pad)
 
+    # 좌우 반전
+    if flip_x:
+        ax.invert_xaxis()
+
     # Legend
     handles, _ = ax.get_legend_handles_labels()
     handles.extend([
@@ -224,6 +235,10 @@ def make_trajectory_plot(traj_x, traj_y, traj_ts, label, color,
             plt.Line2D([0], [0], color="magenta", linewidth=1.2,
                        marker=">", markersize=5, label="Landmark Normal"),
         ])
+    if blind_mask is not None and np.any(blind_mask):
+        handles.append(
+            plt.Line2D([0], [0], color="red", linewidth=3.5, alpha=0.5,
+                       label="Blind Zone"))
     handles.extend([
         plt.Line2D([0], [0], color="gray", marker="o", linestyle="None",
                    markersize=6, label="Start"),
@@ -232,26 +247,6 @@ def make_trajectory_plot(traj_x, traj_y, traj_ts, label, color,
     ])
     ax.legend(handles=handles, loc="upper right", fontsize=8,
               framealpha=0.9)
-
-    # Metrics text box
-    lines = []
-    for i, wp in enumerate(wp_results):
-        gx, gy = wp["gt"]
-        lines.append(f"WP{i+1} ({gx:.0f},{gy:.0f}): "
-                     f"closest={wp['closest_dist']:.3f}m  "
-                     f"stop={wp['stop_error']:.3f}m")
-    if traj_x is not None and len(traj_x) > 1:
-        travel = float(np.sum(np.sqrt(np.diff(traj_x)**2 +
-                                      np.diff(traj_y)**2)))
-        loop_err = math.hypot(traj_x[-1] - traj_x[0],
-                              traj_y[-1] - traj_y[0])
-        lines.append(f"Travel: {travel:.1f}m  Loop err: {loop_err:.3f}m")
-    text = "\n".join(lines)
-    ax.text(0.02, 0.02, text, transform=ax.transAxes, fontsize=8,
-            verticalalignment="bottom", fontfamily="monospace",
-            bbox=dict(boxstyle="round,pad=0.4", facecolor="white",
-                      alpha=0.85),
-            zorder=20)
 
     plt.tight_layout()
     return fig
@@ -418,6 +413,8 @@ def main():
     parser.add_argument("--swap-xy", action="store_true",
                         help="Coordinate transform: user_x=slam_y, "
                              "user_y=slam_x")
+    parser.add_argument("--flip-x", action="store_true",
+                        help="Mirror plot horizontally (invert X axis)")
     parser.add_argument("--output-dir", type=str, default=None)
     args = parser.parse_args()
 
@@ -501,12 +498,22 @@ def main():
         out_dir = os.path.dirname(os.path.abspath(__file__))
     os.makedirs(out_dir, exist_ok=True)
 
+    # ── Blind mask (ArUco 미인지 구간) ──
+    slam_blind = None
+    ekf_blind = None
+    if len(det_ts) > 0:
+        if slam_ts is not None:
+            slam_blind = compute_blind_mask(slam_ts, det_ts, threshold=0.5)
+        if ekf_ts is not None:
+            ekf_blind = compute_blind_mask(ekf_ts, det_ts, threshold=0.5)
+
     # ── SLAM plot ──
     if slam_ux is not None:
         fig = make_trajectory_plot(
             slam_ux, slam_uy, slam_ts,
             f"SLAM ({args.slam_topic})", "purple",
-            landmarks_user, waypoints, slam_wp, slam_stops)
+            landmarks_user, waypoints, slam_wp, slam_stops,
+            blind_mask=slam_blind, flip_x=args.flip_x)
         path = os.path.join(out_dir, "trajectory_slam.png")
         fig.savefig(path, dpi=150)
         plt.close(fig)
@@ -517,7 +524,8 @@ def main():
         fig = make_trajectory_plot(
             ekf_ux, ekf_uy, ekf_ts,
             f"EKF ({args.ekf_topic})", "darkorange",
-            {}, waypoints, ekf_wp, ekf_stops)
+            {}, waypoints, ekf_wp, ekf_stops,
+            blind_mask=ekf_blind, flip_x=args.flip_x)
         path = os.path.join(out_dir, "trajectory_ekf.png")
         fig.savefig(path, dpi=150)
         plt.close(fig)

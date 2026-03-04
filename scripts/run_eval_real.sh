@@ -36,6 +36,7 @@ echo "================================================"
 python3 /ros_ws/src/aruco_sam_ailab/scripts/evaluate_real.py \
     --bag "$BAG_PATH" \
     --swap-xy \
+    --flip-x \
     --output-dir "$OUT_DIR" \
     "$@"
 
