@@ -69,6 +69,7 @@ public:
 
     // EKF tuning parameters
     double qPos_, qRot_, rPos_, rRot_;
+    bool lock_z_output_ = true;
 
     // LPF state for smooth output (v, yaw_rate)
     double smoothed_v_ = 0.0;
@@ -88,11 +89,13 @@ public:
         declare_parameter("ekf_process_noise_rot", 0.05);
         declare_parameter("ekf_measurement_noise_pos", 0.05);
         declare_parameter("ekf_measurement_noise_rot", 0.05);
+        declare_parameter("ekf_lock_z_output", true);
 
         get_parameter("ekf_process_noise_pos", qPos_);
         get_parameter("ekf_process_noise_rot", qRot_);
         get_parameter("ekf_measurement_noise_pos", rPos_);
         get_parameter("ekf_measurement_noise_rot", rRot_);
+        get_parameter("ekf_lock_z_output", lock_z_output_);
 
         // Initialize covariance matrices
         P_ = Eigen::Matrix<double, N, N>::Identity() * 0.01;
@@ -122,8 +125,8 @@ public:
         tfBroadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
 
         RCLCPP_INFO(get_logger(),
-                    "EKF Smoother initialized (Q_pos=%.3f, Q_rot=%.3f, R_pos=%.3f, R_rot=%.3f)",
-                    qPos_, qRot_, rPos_, rRot_);
+                    "EKF Smoother initialized (Q_pos=%.3f, Q_rot=%.3f, R_pos=%.3f, R_rot=%.3f, lock_z_output=%s)",
+                    qPos_, qRot_, rPos_, rRot_, lock_z_output_ ? "true" : "false");
     }
 
     // ─── Prediction step: apply relative motion from IMU odom ───
@@ -306,6 +309,9 @@ public:
         odom.header.frame_id = odomFrame;
         odom.child_frame_id = baseLinkFrame;
         odom.pose.pose = gtsamToPoseMsg(statePose_);
+        if (lock_z_output_) {
+            odom.pose.pose.position.z = 0.0;
+        }
 
         // 속도: IMU preintegration에서 수신한 값을 그대로 전달
         odom.twist.twist.linear.x = current_v_;
@@ -336,7 +342,7 @@ public:
         t.child_frame_id = baseLinkFrame;
         t.transform.translation.x = odom.pose.pose.position.x;
         t.transform.translation.y = odom.pose.pose.position.y;
-        t.transform.translation.z = odom.pose.pose.position.z;
+        t.transform.translation.z = lock_z_output_ ? 0.0 : odom.pose.pose.position.z;
         t.transform.rotation = odom.pose.pose.orientation;
         tfBroadcaster_->sendTransform(t);
 
