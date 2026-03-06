@@ -41,6 +41,38 @@ from visualize_gt_markers import (
 
 
 # ═══════════════════════════════════════
+# Outlier filtering
+# ═══════════════════════════════════════
+
+def filter_odom_outliers(ts, x, y, yaw, max_speed=2.0):
+    """Iteratively remove odom samples with speed > max_speed (m/s).
+
+    Repeats until no more outliers remain, since removing one outlier
+    can expose the next jump.  Returns filtered (ts, x, y, yaw).
+    """
+    orig_n = len(ts)
+    while True:
+        dt = np.diff(ts)
+        dt[dt == 0] = 1e-6
+        speed = np.sqrt((np.diff(x) / dt)**2 + (np.diff(y) / dt)**2)
+
+        keep = np.ones(len(ts), dtype=bool)
+        for i in range(1, len(ts)):
+            if speed[i - 1] > max_speed:
+                keep[i] = False
+
+        if keep.all():
+            break
+        ts, x, y, yaw = ts[keep], x[keep], y[keep], yaw[keep]
+
+    n_removed = orig_n - len(ts)
+    if n_removed > 0:
+        print(f"  Outlier filter: removed {n_removed}/{orig_n} samples "
+              f"(max_speed={max_speed} m/s)")
+    return ts, x, y, yaw
+
+
+# ═══════════════════════════════════════
 # Stop detection
 # ═══════════════════════════════════════
 
@@ -429,6 +461,14 @@ def main():
         args.bag, args.ekf_topic)
     lm_raw = extract_slam_landmarks(args.bag)
     det_ts, _ = extract_aruco_detection_times(args.bag)
+
+    # ── Outlier filtering ──
+    if slam_ts is not None:
+        slam_ts, slam_x, slam_y, slam_yaw = filter_odom_outliers(
+            slam_ts, slam_x, slam_y, slam_yaw)
+    if ekf_ts is not None:
+        ekf_ts, ekf_x, ekf_y, ekf_yaw = filter_odom_outliers(
+            ekf_ts, ekf_x, ekf_y, ekf_yaw)
 
     # ── Coordinate transform ──
     if args.swap_xy:
