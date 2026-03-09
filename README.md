@@ -10,29 +10,15 @@ Designed for the **Hunter 2 UGV** platform but compatible with any ROS 2 robot e
 
 ### Simulation — Full Pipeline (Mapping + Localization + Planning)
 
-https://github.com/user-attachments/assets/Final_sim.mp4
-
-<video src="assets/Final sim.mp4" width="720" controls>
-  Your browser does not support the video tag.
-</video>
+https://github.com/user-attachments/assets/1bf4b570-bf2f-4c00-a3c6-1c8070da9a6d
 
 End-to-end demonstration in Gazebo: the robot maps the environment using ArUco landmarks (ID 11–20), saves the landmark map, then switches to localization mode and autonomously navigates within the mapped boundary.
 
 ### Real Robot — Standalone SLAM
 
-<video src="assets/real_solo_results.mp4" width="720" controls>
-  Your browser does not support the video tag.
-</video>
+https://github.com/user-attachments/assets/eed05143-c812-43bb-a7ad-7fb459602618
 
 Real-world SLAM on the Hunter 2 UGV with an Intel RealSense D455. Shows ArUco detection, factor graph optimization, and EKF-smoothed odometry output in a physical environment.
-
-### Real Robot — SLAM + Obstacle Avoidance
-
-<video src="assets/real_object_avoid_results.mp4" width="720" controls>
-  Your browser does not support the video tag.
-</video>
-
-Full autonomy stack on the real robot: ArUco-based SLAM provides localization while the planning module performs real-time obstacle avoidance using local costmaps.
 
 ---
 
