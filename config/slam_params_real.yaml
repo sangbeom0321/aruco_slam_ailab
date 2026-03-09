@@ -84,6 +84,7 @@
     # Measurement noise (σ): SLAM correction accuracy — 높을수록 부드러움 ↑
     ekf_measurement_noise_pos: 0.05    # SLAM position σ (m) — position 보정 빠르게
     ekf_measurement_noise_rot: 0.15    # SLAM rotation σ (rad) — heading 보정은 부드럽게
+    ekf_lock_z_output: true            # true면 /ekf/odom, odom->base_footprint 출력 z를 0으로 고정
 
     # Debug
     enable_topic_debug_log: true
